@@ -11,7 +11,7 @@ use near_primitives::telemetry::{
     TelemetryAgentInfo, TelemetryChainInfo, TelemetryInfo, TelemetrySystemInfo,
 };
 use near_primitives::types::{
-    AccountId, Balance, BlockHeight, EpochHeight, EpochId, Gas, NumBlocks, ShardId,
+    AccountId, Balance, BlockHeight, EpochHeight, EpochId, Gas, NumBlocks, ShardId, ValidatorId,
     ValidatorInfoIdentifier,
 };
 use near_primitives::unwrap_or_return;
@@ -24,6 +24,7 @@ use near_primitives::views::{
 use near_store::db::StoreStatistics;
 use near_telemetry::{telemetry, TelemetryActor};
 use std::cmp::min;
+use std::collections::HashMap;
 use std::fmt::Write;
 use std::sync::Arc;
 use std::time::Instant;
@@ -60,6 +61,8 @@ pub struct InfoHelper {
     telemetry_actor: Option<Addr<TelemetryActor>>,
     /// Log coloring enabled
     log_summary_style: LogSummaryStyle,
+    /// Epoch height
+    epoch_id: Option<EpochId>,
     /// Timestamp of starting the client.
     pub boot_time_seconds: i64,
 }
@@ -84,6 +87,7 @@ impl InfoHelper {
             validator_signer,
             log_summary_style: client_config.log_summary_style,
             boot_time_seconds: StaticClock::utc().timestamp(),
+            epoch_id: None,
         }
     }
 
@@ -182,6 +186,43 @@ impl InfoHelper {
         }
     }
 
+    fn record_epoch_settlement_info(head: &Tip, client: &crate::client::Client) {
+        let epoch_info = client.runtime_adapter.get_epoch_info(&head.epoch_id);
+        let blocks_in_epoch = client.config.epoch_length;
+        let number_of_shards =
+            client.runtime_adapter.num_shards(&head.epoch_id).unwrap_or_default();
+        if let Ok(epoch_info) = epoch_info {
+            let mut blocks = HashMap::<ValidatorId, usize>::new();
+            let mut chunks = HashMap::<ValidatorId, usize>::new();
+            let blocks_range = client
+                .runtime_adapter
+                .get_epoch_start_height(&head.last_block_hash)
+                .map_or(0..0, |epoch_start_height| {
+                    epoch_start_height..(epoch_start_height + blocks_in_epoch)
+                });
+            for height in blocks_range {
+                *blocks.entry(epoch_info.sample_block_producer(height)).or_default() += 1;
+                for shard_id in 0..number_of_shards {
+                    *chunks
+                        .entry(epoch_info.sample_chunk_producer(height, shard_id))
+                        .or_default() += 1;
+                }
+            }
+
+            blocks.iter().for_each(|(&id, &cnt)| {
+                metrics::VALIDATORS_BLOCKS_EXPECTED_IN_EPOCH
+                    .with_label_values(&[epoch_info.get_validator(id).account_id().as_str()])
+                    .set(cnt as i64)
+            });
+
+            chunks.iter().for_each(|(&id, &cnt)| {
+                metrics::VALIDATORS_CHUNKS_EXPECTED_IN_EPOCH
+                    .with_label_values(&[epoch_info.get_validator(id).account_id().as_str()])
+                    .set(cnt as i64)
+            });
+        }
+    }
+
     /// Print current summary.
     pub fn log_summary(
         &mut self,
@@ -243,6 +284,11 @@ impl InfoHelper {
         InfoHelper::record_tracked_shards(&head, &client);
         InfoHelper::record_block_producers(&head, &client);
         InfoHelper::record_chunk_producers(&head, &client);
+        if self.epoch_id.as_ref().map_or(true, |epoch_id| epoch_id != &head.epoch_id) {
+            // This is an expensive operation and we want to do it only when epoch changes.
+            InfoHelper::record_epoch_settlement_info(&head, &client);
+            self.epoch_id = Some(head.epoch_id.clone());
+        }
 
         self.info(
             &head,
