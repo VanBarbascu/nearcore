@@ -51,9 +51,10 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::ops::Add;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{Ordering};
 use std::sync::Arc;
 use std::time::Duration as TimeDuration;
+use tokio::sync::{Semaphore, TryAcquireError};
 
 /// Maximum number of state parts to request per peer on each round when node is trying to download the state.
 pub const MAX_STATE_PART_REQUEST: u64 = 16;
@@ -116,11 +117,10 @@ enum StateSyncInner {
     PartsFromExternal {
         /// Chain ID.
         chain_id: String,
-        /// The number of requests for state parts from external storage that are
-        /// allowed to be started for this shard.
-        requests_remaining: Arc<AtomicI32>,
         /// Connection to the external storage.
         external: ExternalConnection,
+        /// semaphore
+        semaphore: Arc<tokio::sync::Semaphore>,
     },
 }
 
@@ -281,8 +281,10 @@ impl StateSync {
                 };
                 StateSyncInner::PartsFromExternal {
                     chain_id: chain_id.to_string(),
-                    requests_remaining: Arc::new(AtomicI32::new(*num_concurrent_requests as i32)),
                     external,
+                    semaphore: Arc::new(tokio::sync::Semaphore::new(
+                        *num_concurrent_requests as usize,
+                    )),
                 }
             }
         };
@@ -758,7 +760,11 @@ impl StateSync {
                     );
                 }
             }
-            StateSyncInner::PartsFromExternal { chain_id, requests_remaining, external } => {
+            StateSyncInner::PartsFromExternal {
+                chain_id,
+                external,
+                semaphore,
+            } => {
                 let sync_block_header = chain.get_block_header(&sync_hash).unwrap();
                 let epoch_id = sync_block_header.epoch_id();
                 let epoch_info = chain.epoch_manager.get_epoch_info(epoch_id).unwrap();
@@ -767,9 +773,12 @@ impl StateSync {
                 let shard_state_header = chain.get_state_header(shard_id, sync_hash).unwrap();
                 let state_num_parts =
                     get_num_state_parts(shard_state_header.state_root_node().memory_usage);
-
+                // We can only send out a limited number of request at the same time.
+                // We are creating a thread to wait for all the reequests to be started.
+                let permits_left = semaphore.available_permits();
+                tracing::info!(target: "sync", %shard_id, ?permits_left, "Permits left");
                 for (part_id, download) in parts_to_fetch(new_shard_sync_download) {
-                    request_part_from_external_storage(
+                    match request_part_from_external_storage(
                         part_id,
                         download,
                         shard_id,
@@ -777,9 +786,15 @@ impl StateSync {
                         epoch_height,
                         state_num_parts,
                         &chain_id.clone(),
-                        requests_remaining.clone(),
                         external.clone(),
-                    );
+                        semaphore.clone(),
+                    ) {
+                        None => {},
+                        join_handler => download.join_handler = join_handler,
+                    }
+                    if semaphore.available_permits() == 0 {
+                        break;
+                    }
                 }
             }
         }
@@ -1224,31 +1239,38 @@ fn request_part_from_external_storage(
     epoch_height: EpochHeight,
     num_parts: u64,
     chain_id: &str,
-    requests_remaining: Arc<AtomicI32>,
     external: ExternalConnection,
-) {
-    if !allow_request(&requests_remaining) {
-        return;
-    } else {
-        if !download.run_me.swap(false, Ordering::SeqCst) {
-            tracing::info!(target: "sync", %shard_id, part_id, "run_me is already false");
-            return;
-        }
+    semaphore: Arc<Semaphore>,
+) -> Option<tokio::task::JoinHandle<Result<Vec<u8>, String>>> {
+    if !download.run_me.swap(false, Ordering::SeqCst) {
+        tracing::info!(target: "sync", %shard_id, part_id, "run_me is already false");
+        return None
     }
+
     download.state_requests_count += 1;
     download.last_target = None;
 
-    let location =
-        external_storage_location(chain_id, epoch_id, epoch_height, shard_id, part_id, num_parts);
-    let download_response = download.response.clone();
-    near_performance_metrics::actix::spawn("StateSync", {
-        async move {
+    let location = external_storage_location(chain_id, epoch_id, epoch_height, shard_id, part_id, num_parts);
+    tracing::info!(target: "sync", %shard_id, part_id, "Acquire download lock.");
+    match semaphore.try_acquire_owned() {
+    Ok(permit) => {
+        tracing::info!(target: "sync", %shard_id, part_id, "Scheduled part download.");
+        Some(tokio::spawn(async move {
             let result = external.get_part(shard_id, &location).await;
-            finished_request(&requests_remaining);
-            let mut lock = download_response.lock().unwrap();
-            *lock = Some(result.map_err(|err| err.to_string()));
-        }
-    });
+            drop(permit);
+            return result.map_err(|err| err.to_string());
+        }))
+    },
+    Err(TryAcquireError::NoPermits) => {
+        download.run_me.store(true, Ordering::SeqCst);
+        None
+    },
+    Err(TryAcquireError::Closed) => {
+        download.run_me.store(true, Ordering::SeqCst);
+        tracing::warn!(target: "sync", %shard_id, part_id, "Failed to schedule download. Semaphore closed.");
+        None
+    }
+}
 }
 
 /// Asynchronously requests a state part from a suitable peer.
@@ -1304,21 +1326,6 @@ fn sent_request_part(
         .or_insert_with(|| PendingRequestStatus::new(timeout));
 }
 
-/// Verifies that one more concurrent request can be started.
-fn allow_request(requests_remaining: &AtomicI32) -> bool {
-    let remaining = requests_remaining.fetch_sub(1, Ordering::SeqCst);
-    if remaining <= 0 {
-        requests_remaining.fetch_add(1, Ordering::SeqCst);
-        false
-    } else {
-        true
-    }
-}
-
-fn finished_request(requests_remaining: &AtomicI32) {
-    requests_remaining.fetch_add(1, Ordering::SeqCst);
-}
-
 /// Works around how data requests to external storage are done.
 /// The response is stored on the DownloadStatus object.
 /// This function investigates if the response is available and updates `done` and `error` appropriately.
@@ -1334,16 +1341,23 @@ fn check_external_storage_part_response(
     chain: &mut Chain,
 ) -> bool {
     let external_storage_response = {
-        let mut lock = part_download.response.lock().unwrap();
-        if let Some(response) = lock.clone() {
-            tracing::debug!(target: "sync", %shard_id, part_id, "Got response from external storage");
-            // Remove the response from DownloadStatus, because
-            // we're going to write state parts to DB and don't need to keep
-            // them in `DownloadStatus`.
-            *lock = None;
-            response
-        } else {
+        if part_download.join_handler.is_none() {
             return false;
+        } else {
+            if !part_download.join_handler.as_mut().unwrap().is_finished() {
+                return false;
+            }
+            let response = part_download.join_handler.as_mut().unwrap().now_or_never().unwrap();
+            match response {
+                Err(_) => {
+                    tracing::debug!(target: "sync", %shard_id, part_id, "Panicked trying to get response from external storage");
+                    return false;
+                }
+                Ok(response) => {
+                    tracing::debug!(target: "sync", %shard_id, part_id, "Got response from external storage");
+                    response
+                },
+            }
         }
     };
 
