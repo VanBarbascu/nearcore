@@ -155,21 +155,12 @@ impl ClientActor {
         network_adapter: PeerManagerAdapter,
         validator_signer: Option<Arc<dyn ValidatorSigner>>,
         telemetry_actor: Addr<TelemetryActor>,
-        ctx: &Context<ClientActor>,
         shutdown_signal: Option<broadcast::Sender<()>>,
         adv: crate::adversarial::Controls,
         config_updater: Option<ConfigUpdater>,
+        sync_jobs_actor_addr: Addr<SyncJobsActor>,
+        state_parts_arbiter: Arbiter,
     ) -> Result<Self, Error> {
-        let state_parts_arbiter = Arbiter::new();
-        let self_addr = ctx.address();
-        let self_addr_clone = self_addr;
-        let sync_jobs_actor_addr = SyncJobsActor::start_in_arbiter(
-            &state_parts_arbiter.handle(),
-            move |ctx: &mut Context<SyncJobsActor>| -> SyncJobsActor {
-                ctx.set_mailbox_capacity(SyncJobsActor::MAILBOX_CAPACITY);
-                SyncJobsActor { client_addr: self_addr_clone }
-            },
-        );
         if let Some(vs) = &validator_signer {
             info!(target: "client", "Starting validator node: {}", vs.validator_id());
         }
@@ -1761,12 +1752,16 @@ impl Drop for ClientActor {
     }
 }
 
-struct SyncJobsActor {
+pub struct SyncJobsActor {
     client_addr: Addr<ClientActor>,
 }
 
 impl SyncJobsActor {
     const MAILBOX_CAPACITY: usize = 100;
+
+    pub fn new(client_addr: Addr<ClientActor>) -> Self {
+        SyncJobsActor { client_addr }
+    }
 
     fn apply_parts(
         &mut self,
@@ -1989,21 +1984,35 @@ pub fn start_client(
 ) -> (Addr<ClientActor>, ArbiterHandle) {
     let client_arbiter = Arbiter::new();
     let client_arbiter_handle = client_arbiter.handle();
+    let state_parts_arbiter = Arbiter::new();
+
     wait_until_genesis(&chain_genesis.time);
-    let client = Client::new(
-        client_config.clone(),
-        chain_genesis,
-        epoch_manager,
-        shard_tracker,
-        runtime,
-        network_adapter.clone(),
-        shards_manager_adapter,
-        validator_signer.clone(),
-        true,
-        random_seed_from_thread(),
-    )
-    .unwrap();
+
     let client_addr = ClientActor::start_in_arbiter(&client_arbiter_handle, move |ctx| {
+        let client = Client::new(
+            client_config.clone(),
+            chain_genesis,
+            epoch_manager,
+            shard_tracker,
+            runtime,
+            network_adapter.clone(),
+            shards_manager_adapter,
+            validator_signer.clone(),
+            true,
+            random_seed_from_thread(),
+            state_parts_arbiter.handle(),
+        )
+        .unwrap();
+
+        let client_addr = ctx.address();
+        let sync_jobs_actor_addr = SyncJobsActor::start_in_arbiter(
+            &state_parts_arbiter.handle(),
+            move |ctx: &mut Context<SyncJobsActor>| -> SyncJobsActor {
+                ctx.set_mailbox_capacity(SyncJobsActor::MAILBOX_CAPACITY);
+                SyncJobsActor { client_addr: client_addr }
+            },
+        );
+
         ClientActor::new(
             client,
             ctx.address(),
@@ -2012,10 +2021,11 @@ pub fn start_client(
             network_adapter,
             validator_signer,
             telemetry_actor,
-            ctx,
             sender,
             adv,
             config_updater,
+            sync_jobs_actor_addr,
+            state_parts_arbiter,
         )
         .unwrap()
     });

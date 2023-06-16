@@ -9,6 +9,7 @@ use crate::sync::epoch::EpochSync;
 use crate::sync::header::HeaderSync;
 use crate::sync::state::{StateSync, StateSyncResult};
 use crate::{metrics, SyncStatus};
+use actix_rt::ArbiterHandle;
 use lru::LruCache;
 use near_async::messaging::{CanSend, Sender};
 use near_chain::chain::{
@@ -133,6 +134,7 @@ pub struct Client {
     pub block_sync: BlockSync,
     /// Keeps track of syncing state.
     pub state_sync: StateSync,
+    state_parts_arbiter_handle: ArbiterHandle,
     /// List of currently accumulated challenges.
     pub challenges: HashMap<CryptoHash, Challenge>,
     /// A ReedSolomon instance to reconstruct shard.
@@ -198,6 +200,7 @@ impl Client {
         validator_signer: Option<Arc<dyn ValidatorSigner>>,
         enable_doomslug: bool,
         rng_seed: RngSeed,
+        state_parts_arbiter_handle: ArbiterHandle,
     ) -> Result<Self, Error> {
         let doomslug_threshold_mode = if enable_doomslug {
             DoomslugThresholdMode::TwoThirds
@@ -263,6 +266,7 @@ impl Client {
             config.state_sync_timeout,
             &config.chain_id,
             &config.state_sync.sync,
+            state_parts_arbiter_handle.clone(),
         );
         let num_block_producer_seats = config.num_block_producer_seats as usize;
         let data_parts = epoch_manager.num_data_parts();
@@ -311,6 +315,7 @@ impl Client {
             header_sync,
             block_sync,
             state_sync,
+            state_parts_arbiter_handle: state_parts_arbiter_handle,
             challenges: Default::default(),
             rs_for_chunk_production: ReedSolomonWrapper::new(data_parts, parity_parts),
             rebroadcasted_blocks: lru::LruCache::new(NUM_REBROADCAST_BLOCKS),
@@ -2163,6 +2168,7 @@ impl Client {
                             state_sync_timeout,
                             &self.config.chain_id,
                             &self.config.state_sync.sync,
+                            self.state_parts_arbiter_handle.clone(),
                         ),
                         new_shard_sync,
                         BlocksCatchUpState::new(sync_hash, epoch_id),

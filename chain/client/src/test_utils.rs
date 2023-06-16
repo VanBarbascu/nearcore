@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use actix::{Actor, Addr, AsyncContext, Context};
+use actix_rt::Arbiter;
 use chrono::DateTime;
 use futures::{future, FutureExt};
 use near_async::actix::AddrWithAutoSpanContextExt;
@@ -23,6 +24,7 @@ use once_cell::sync::OnceCell;
 use rand::{thread_rng, Rng};
 use tracing::info;
 
+use crate::client_actor::SyncJobsActor;
 use crate::{start_view_client, Client, ClientActor, SyncStatus, ViewClientActor};
 use chrono::Utc;
 use near_chain::chain::{do_apply_chunks, BlockCatchUpRequest, StateSplitRequest};
@@ -272,6 +274,17 @@ pub fn setup(
     );
     let shards_manager_adapter = Arc::new(shards_manager_addr);
 
+    let state_parts_arbiter = Arbiter::new();
+    let client_addr = ctx.address();
+    let sync_jobs_actor_addr = SyncJobsActor::start_in_arbiter(
+        &state_parts_arbiter.handle(),
+        move |ctx: &mut Context<SyncJobsActor>| -> SyncJobsActor {
+            ctx.set_mailbox_capacity(100);
+            SyncJobsActor::new(client_addr)
+        },
+    );
+
+
     let client = Client::new(
         config.clone(),
         chain_genesis,
@@ -283,6 +296,7 @@ pub fn setup(
         Some(signer.clone()),
         enable_doomslug,
         TEST_SEED,
+        state_parts_arbiter.handle(),
     )
     .unwrap();
     let client_actor = ClientActor::new(
@@ -293,10 +307,11 @@ pub fn setup(
         network_adapter,
         Some(signer),
         telemetry,
-        ctx,
         None,
         adv,
         None,
+        sync_jobs_actor_addr,
+        state_parts_arbiter,
     )
     .unwrap();
     (genesis_block, client_actor, view_client_addr, shards_manager_adapter.into())
@@ -1158,6 +1173,7 @@ pub fn setup_client_with_runtime(
         validator_signer,
         enable_doomslug,
         rng_seed,
+        Arbiter::new().handle(),
     )
     .unwrap();
     client.sync_status = SyncStatus::NoSync;
