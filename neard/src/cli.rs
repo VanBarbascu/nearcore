@@ -532,6 +532,7 @@ impl RunCmd {
                 rpc_servers,
                 cold_store_loop_handle,
                 state_sync_dump_handle,
+                state_sync_parts_upload_handle,
                 flat_state_migration_handle,
                 ..
             } = nearcore::start_with_config_and_synchronization(
@@ -557,6 +558,9 @@ impl RunCmd {
                 handle.stop()
             }
             if let Some(handle) = state_sync_dump_handle {
+                handle.stop()
+            }
+            if let Some(handle) = state_sync_parts_upload_handle {
                 handle.stop()
             }
             if let Some(handle) = flat_state_migration_handle {

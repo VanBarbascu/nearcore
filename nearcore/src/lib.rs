@@ -5,6 +5,7 @@ pub use crate::runtime::NightshadeRuntime;
 
 use crate::cold_storage::spawn_cold_store_loop;
 use crate::state_sync::{spawn_state_sync_dump, StateSyncDumpHandle};
+use crate::state_parts_upload_actor::{spawn_state_sync_parts_upload, StatePartsUploadHandle};
 use actix::{Actor, Addr};
 use actix_rt::ArbiterHandle;
 use anyhow::Context;
@@ -45,6 +46,7 @@ mod metrics;
 pub mod migrations;
 mod runtime;
 pub mod state_sync;
+pub mod state_parts_upload_actor;
 
 pub fn get_default_home() -> PathBuf {
     if let Ok(near_home) = std::env::var("NEAR_HOME") {
@@ -205,6 +207,8 @@ pub struct NearNode {
     pub cold_store_loop_handle: Option<ColdStoreLoopHandle>,
     /// Contains handles to background threads that may be dumping state to S3.
     pub state_sync_dump_handle: Option<StateSyncDumpHandle>,
+    /// Handle to task that generates parts and shares them with peers.
+    pub state_sync_parts_upload_handle: Option<StatePartsUploadHandle>,
     /// A handle to control background flat state values inlining migration.
     /// Needed temporarily, will be removed after the migration is completed.
     pub flat_state_migration_handle: Option<FlatStateValuesInliningMigrationHandle>,
@@ -373,6 +377,8 @@ pub fn start_with_config_and_synchronization(
         credentials_file.map(|filename| home_dir.join(filename)),
     )?;
 
+    let state_sync_parts_upload_handle = spawn_state_sync_parts_upload()?;
+
     let hot_store = storage.get_hot_store();
 
     #[allow(unused_mut)]
@@ -436,6 +442,7 @@ pub fn start_with_config_and_synchronization(
         arbiters,
         cold_store_loop_handle,
         state_sync_dump_handle,
+        state_sync_parts_upload_handle,
         flat_state_migration_handle,
     })
 }
