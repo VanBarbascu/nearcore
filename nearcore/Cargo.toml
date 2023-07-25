@@ -58,6 +58,7 @@ near-mainnet-res.workspace = true
 near-network.workspace = true
 near-o11y.workspace = true
 near-performance-metrics.workspace = true
+near-performance-metrics-macros.workspace = true
 near-pool.workspace = true
 near-primitives.workspace = true
 near-rosetta-rpc = { workspace = true, optional = true }

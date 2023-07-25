@@ -398,6 +398,11 @@ pub enum PeerMessage {
     BlockHeadersRequest(Vec<CryptoHash>),
     BlockHeaders(Vec<BlockHeader>),
 
+    StatePartRequest(ShardId, CryptoHash, u64),
+    VersionedStatePartResponse(StateResponseInfo),
+    KnownStateRequest(KnownStateRequestMsg),
+    KnownStateResponse(KnownStateResponseMsg),
+
     BlockRequest(CryptoHash),
     Block(Block),
 
@@ -806,6 +811,21 @@ impl StateResponseInfo {
             Self::V2(info) => info.state_response,
         }
     }
+}
+
+#[derive(PartialEq, Eq, Clone, Debug, borsh::BorshSerialize, borsh::BorshDeserialize)]
+pub struct KnownStateRequestMsg {
+    pub sync_hash: CryptoHash,
+}
+
+#[derive(PartialEq, Eq, Clone, Debug, borsh::BorshSerialize, borsh::BorshDeserialize)]
+pub struct KnownStateResponseMsg {
+    pub sync_hash: CryptoHash,
+    pub num_shards: usize,
+    pub part_size: usize,
+    /// Each element represents the parts known for that shard.
+    // TODO(razvan): use BitVec to reduce the size of the message.
+    pub known_parts: Vec<Vec<u8>>,
 }
 
 #[derive(

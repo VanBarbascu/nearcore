@@ -1,6 +1,6 @@
 use crate::network_protocol::{
     Encoding, Handshake, HandshakeFailureReason, PartialEdgeInfo, PeerChainInfoV2, PeerIdOrHash,
-    PeerMessage, Ping, Pong, RawRoutedMessage, RoutedMessageBody, RoutingTableUpdate,
+    PeerMessage, Ping, Pong, RawRoutedMessage, RoutedMessageBody, RoutingTableUpdate, KnownStateRequestMsg, KnownStateResponseMsg,
 };
 use crate::tcp;
 use crate::types::{
@@ -93,6 +93,10 @@ pub enum DirectMessage {
     Block(Block),
     BlockHeadersRequest(Vec<CryptoHash>),
     BlockHeaders(Vec<BlockHeader>),
+    StatePartRequest(ShardId, CryptoHash, u64),
+    VersionedStatePartResponse(StateResponseInfo),
+    KnownStateRequest(KnownStateRequestMsg),
+    KnownStateResponse(KnownStateResponseMsg),
 }
 
 impl fmt::Display for DirectMessage {
@@ -114,6 +118,21 @@ impl fmt::Debug for DirectMessage {
                     "BlockHeaders({:?})",
                     h.iter().map(|h| format!("#{} {}", h.height(), h.hash())).collect::<Vec<_>>()
                 )
+            }
+            Self::StatePartRequest(shard_id, hash, part_id) => {
+                write!(f, "StateRequestPart({}, {}, {})", shard_id, hash, part_id)
+            }
+            Self::VersionedStatePartResponse(r) => write!(
+                f,
+                "VersionedStateResponse(shard_id: {} sync_hash: {})",
+                r.shard_id(),
+                r.sync_hash()
+            ),
+            Self::KnownStateRequest(request) => {
+                write!(f, "KnowStateRequest({:?})", request.sync_hash)
+            }
+            Self::KnownStateResponse(response) => {
+                write!(f, "KnowStateResponse({:?})", response.sync_hash)
             }
         }
     }
@@ -367,6 +386,10 @@ impl Connection {
             DirectMessage::Block(b) => PeerMessage::Block(b),
             DirectMessage::BlockHeadersRequest(h) => PeerMessage::BlockHeadersRequest(h),
             DirectMessage::BlockHeaders(h) => PeerMessage::BlockHeaders(h),
+            DirectMessage::StatePartRequest(shard_id, crypto_hash, part_id) => PeerMessage::StatePartRequest(shard_id, crypto_hash, part_id),
+            DirectMessage::VersionedStatePartResponse(response) => PeerMessage::VersionedStatePartResponse(response),
+            DirectMessage::KnownStateRequest(request) => PeerMessage::KnownStateRequest(request),
+            DirectMessage::KnownStateResponse(response) => PeerMessage::KnownStateResponse(response),
         };
 
         self.stream.write_message(&peer_msg).await

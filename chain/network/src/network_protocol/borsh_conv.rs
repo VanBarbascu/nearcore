@@ -156,6 +156,18 @@ impl TryFrom<&net::PeerMessage> for mem::PeerMessage {
             net::PeerMessage::_RoutingTableSyncV2 => {
                 return Err(Self::Error::DeprecatedRoutingTableSyncV2)
             }
+            net::PeerMessage::StatePartRequest(shard_id, sync_hash, part_id) => {
+                mem::PeerMessage::StatePartRequest(shard_id, sync_hash, part_id)
+            }
+            net::PeerMessage::VersionedStatePartResponse(response) => {
+                mem::PeerMessage::VersionedStatePartResponse(response)
+            }
+            net::PeerMessage::KnownStateRequest(request) => {
+                mem::PeerMessage::KnownStateRequest(request)
+            }
+            net::PeerMessage::KnownStateResponse(response) => {
+                mem::PeerMessage::KnownStateResponse(response)
+            }
         })
     }
 }
@@ -198,6 +210,18 @@ impl From<&mem::PeerMessage> for net::PeerMessage {
             mem::PeerMessage::Routed(r) => net::PeerMessage::Routed(Box::new(r.msg.clone())),
             mem::PeerMessage::Disconnect(_) => net::PeerMessage::Disconnect,
             mem::PeerMessage::Challenge(c) => net::PeerMessage::Challenge(c),
+            mem::PeerMessage::StatePartRequest(shard_id, sync_hash, part_id) => {
+                net::PeerMessage::StatePartRequest(shard_id, sync_hash, part_id)
+            }
+            mem::PeerMessage::VersionedStatePartResponse(response) => {
+                net::PeerMessage::VersionedStatePartResponse(response)
+            }
+            mem::PeerMessage::KnownStateRequest(request) => {
+                net::PeerMessage::KnownStateRequest(request)
+            }
+            mem::PeerMessage::KnownStateResponse(response) => {
+                net::PeerMessage::KnownStateResponse(response)
+            }
         }
     }
 }

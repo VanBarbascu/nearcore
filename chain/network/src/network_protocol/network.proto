@@ -409,6 +409,30 @@ message TraceContext {
   SamplingPriority sampling_priority = 3;
 }
 
+message StatePartRequest {
+  uint64 shard_id = 1;
+  CryptoHash sync_hash = 2;
+  uint64 part_id = 3;
+}
+
+message StatePartResponse {
+  uint64 shard_id = 1;
+  CryptoHash sync_hash = 2;
+  // TODO: add response body
+}
+
+message KnownStateRequest {
+  CryptoHash sync_hash = 1;
+}
+
+message KnownStateResponse {
+  CryptoHash sync_hash = 1;
+  uint64 num_shards = 2;
+  uint64 part_size = 3;
+  // TODO(razvan): add BitVec to reduce the size of the message.
+}
+
+
 // PeerMessage is a wrapper of all message types exchanged between NEAR nodes.
 // The wire format of a single message M consists of len(M)+4 bytes:
 // <len(M)> : 4 bytes : little endian uint32
@@ -460,5 +484,10 @@ message PeerMessage {
     RoutedMessage routed = 17;
     Disconnect disconnect = 18;
     Challenge challenge = 19;
+
+    StatePartRequest state_part_request = 29;
+    StatePartResponse state_part_response = 30;
+    KnownStateRequest known_state_request = 31;
+    KnownStateResponse known_state_response = 32;
   }
 }

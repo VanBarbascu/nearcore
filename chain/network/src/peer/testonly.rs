@@ -40,6 +40,7 @@ impl PeerConfig {
 pub(crate) enum Event {
     Client(fake_client::Event),
     Network(peer_manager_actor::Event),
+    StatePartsUploader(fake_client::Event),
 }
 
 pub(crate) struct PeerHandle {

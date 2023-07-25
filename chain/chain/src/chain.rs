@@ -5502,7 +5502,7 @@ impl<'a> ChainUpdate<'a> {
         let mut receipt_proof_response: Vec<ReceiptProofResponse> = vec![];
         for incoming_receipt_proof in incoming_receipts_proofs.iter() {
             let ReceiptProofResponse(hash, _) = incoming_receipt_proof;
-            let block_header = self.chain_store_update.get_block_header(hash)?;
+            let block_header = self.chain_store_update.get_block_header(&hash)?;
             if block_header.height() <= chunk.height_included() {
                 receipt_proof_response.push(incoming_receipt_proof.clone());
             }

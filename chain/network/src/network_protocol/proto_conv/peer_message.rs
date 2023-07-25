@@ -1,7 +1,7 @@
 /// Conversion functions for PeerMessage - the top-level message for the NEAR P2P protocol format.
 use super::*;
 
-use crate::network_protocol::proto;
+use crate::network_protocol::{proto, StateResponseInfo};
 use crate::network_protocol::proto::peer_message::Message_type as ProtoMT;
 use crate::network_protocol::{
     AdvertisedPeerDistance, Disconnect, DistanceVector, PeerMessage, PeersRequest, PeersResponse,
@@ -144,6 +144,25 @@ impl TryFrom<&proto::Block> for Block {
 
 //////////////////////////////////////////
 
+
+//////////////////////////////////////////
+
+impl From<&StateResponseInfo> for proto::StatePartResponse {
+    fn from(x: &StateResponseInfo) -> Self {
+        // TODO: fill message.
+        Self { shard_id: x.shard_id(),  sync_hash: todo!(), ..Default::default() }
+    }
+}
+
+impl TryFrom<&proto::StatePartResponse> for StateResponseInfo {
+    type Error = ParseBlockError;
+    fn try_from(_: &proto::StatePartResponse) -> Result<Self, Self::Error> {
+        todo!()
+    }
+}
+
+//////////////////////////////////////////
+
 impl From<&PeerMessage> for proto::PeerMessage {
     fn from(x: &PeerMessage) -> Self {
         Self {
@@ -225,6 +244,11 @@ impl From<&PeerMessage> for proto::PeerMessage {
                     borsh: r.try_to_vec().unwrap(),
                     ..Default::default()
                 }),
+                // TODO
+                PeerMessage::StatePartRequest(_shard_id, _sync_hash, _part_id) => todo!(),
+                PeerMessage::VersionedStatePartResponse(_) => todo!(),
+                PeerMessage::KnownStateRequest(_) => todo!(),
+                PeerMessage::KnownStateResponse(_) => todo!(),
             }),
             ..Default::default()
         }
@@ -276,6 +300,8 @@ pub enum ParsePeerMessageError {
     RoutedCreatedAtTimestamp(ComponentRange),
     #[error("sync_accounts_data: {0}")]
     SyncAccountsData(ParseVecError<ParseSignedAccountDataError>),
+    #[error("state_part_request: {0}")]
+    StatePartRequest(ParseRequiredError<ParseCryptoHashError>),
 }
 
 impl TryFrom<&proto::PeerMessage> for PeerMessage {
@@ -362,6 +388,10 @@ impl TryFrom<&proto::PeerMessage> for PeerMessage {
             ProtoMT::Challenge(c) => PeerMessage::Challenge(
                 Challenge::try_from_slice(&c.borsh).map_err(Self::Error::Challenge)?,
             ),
+            ProtoMT::StatePartRequest(request) => PeerMessage::StatePartRequest(request.shard_id, try_from_required(&request.sync_hash).map_err(Self::Error::StatePartRequest)?, request.part_id),
+            ProtoMT::StatePartResponse(_response) => todo!(),
+            ProtoMT::KnownStateRequest(_request) => todo!(),
+            ProtoMT::KnownStateResponse(_response) => todo!(),
         })
     }
 }

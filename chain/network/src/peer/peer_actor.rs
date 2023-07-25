@@ -5,7 +5,7 @@ use crate::config::PEERS_RESPONSE_MAX_PEERS;
 use crate::network_protocol::{
     DistanceVector, Edge, EdgeState, Encoding, OwnedAccount, ParsePeerMessageError,
     PartialEdgeInfo, PeerChainInfoV2, PeerIdOrHash, PeerInfo, PeersRequest, PeersResponse,
-    RawRoutedMessage, RoutedMessageBody, RoutingTableUpdate, StateResponseInfo, SyncAccountsData,
+    RawRoutedMessage, RoutedMessageBody, RoutingTableUpdate, StateResponseInfo, SyncAccountsData, KnownStateRequestMsg,
 };
 use crate::peer::stream;
 use crate::peer::tracker::Tracker;
@@ -17,6 +17,7 @@ use crate::private_actix::{RegisterPeerError, SendMessage};
 use crate::routing::edge::verify_nonce;
 use crate::routing::NetworkTopologyChange;
 use crate::shards_manager::ShardsManagerRequestFromNetwork;
+use crate::state_sync::{StateSyncRequestFromNetwork, self};
 use crate::stats::metrics;
 use crate::tcp;
 use crate::types::{
@@ -1057,6 +1058,22 @@ impl PeerActor {
                     network_state.client.challenge(challenge).await;
                     None
                 }
+                PeerMessage::StatePartRequest(shard_id, sync_hash, part_id) => {
+                    network_state.state_sync_uploader_adapter.send(StateSyncRequestFromNetwork::StatePartRequest {
+                        request: state_sync::StatePartRequest {shard_id, sync_hash, part_id},
+                        peer_id,
+                    });
+                    None
+                }
+                PeerMessage::KnownStateRequest(request) => {
+                    network_state.state_sync_uploader_adapter.send(StateSyncRequestFromNetwork::KnownStatePartsRequest {
+                        request: KnownStateRequestMsg {sync_hash: request.sync_hash },
+                        peer_id,
+                    });
+                    None
+                }
+                PeerMessage::VersionedStatePartResponse(_request) => None,
+                PeerMessage::KnownStateResponse(_response) => None,
                 msg => {
                     tracing::error!(target: "network", "Peer received unexpected type: {:?}", msg);
                     None

@@ -293,6 +293,7 @@ pub fn start_with_config_and_synchronization(
     let node_id = config.network_config.node_id();
     let network_adapter = Arc::new(LateBoundSender::default());
     let shards_manager_adapter = Arc::new(LateBoundSender::default());
+    let state_sync_uploader_adapter: Arc<LateBoundSender<_>> = Arc::new(LateBoundSender::default());
     let client_adapter_for_shards_manager = Arc::new(LateBoundSender::default());
     let adv = near_client::adversarial::Controls::new(config.client_config.archive);
 
@@ -378,6 +379,9 @@ pub fn start_with_config_and_synchronization(
     )?;
 
     let state_sync_parts_upload_handle = spawn_state_sync_parts_upload()?;
+    if let Some(state_sync_parts_upload_handle) = state_sync_parts_upload_handle {
+        state_sync_uploader_adapter.bind(state_sync_parts_upload_handle.sync_jobs_actor_addr);
+    }
 
     let hot_store = storage.get_hot_store();
 
@@ -389,6 +393,7 @@ pub fn start_with_config_and_synchronization(
         config.network_config,
         Arc::new(near_client::adapter::Adapter::new(client_actor.clone(), view_client.clone())),
         shards_manager_adapter.as_sender(),
+        state_sync_uploader_adapter.as_sender(),
         genesis_id,
     )
     .context("PeerManager::spawn()")?;
