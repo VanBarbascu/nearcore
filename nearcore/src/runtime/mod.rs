@@ -80,7 +80,9 @@ impl NightshadeRuntime {
     pub fn from_config(
         home_dir: &Path,
         store: Store,
+        flat_storage_manager: FlatStorageManager,
         config: &NearConfig,
+        tries: ShardTries,
         epoch_manager: Arc<EpochManagerHandle>,
     ) -> Arc<Self> {
         let state_snapshot_config = if config.config.store.state_snapshot_enabled {
@@ -101,8 +103,9 @@ impl NightshadeRuntime {
             config.client_config.max_gas_burnt_view,
             None,
             config.config.gc.gc_num_epochs_to_keep(),
-            TrieConfig::from_store_config(&config.config.store),
             state_snapshot_config,
+            tries,
+            flat_storage_manager,
         )
     }
 
@@ -115,7 +118,8 @@ impl NightshadeRuntime {
         runtime_config_store: Option<RuntimeConfigStore>,
         gc_num_epochs_to_keep: u64,
         trie_config: TrieConfig,
-        state_snapshot_config: StateSnapshotConfig,
+        tries: ShardTries,
+        flat_storage_manager: FlatStorageManager,
     ) -> Arc<Self> {
         let runtime_config_store = match runtime_config_store {
             Some(store) => store,
@@ -124,14 +128,6 @@ impl NightshadeRuntime {
 
         let runtime = Runtime::new();
         let trie_viewer = TrieViewer::new(trie_viewer_state_size_limit, max_gas_burnt_view);
-        let flat_storage_manager = FlatStorageManager::new(store.clone());
-        let tries = ShardTries::new_with_state_snapshot(
-            store.clone(),
-            trie_config,
-            &genesis_config.shard_layout.get_shard_uids(),
-            flat_storage_manager.clone(),
-            state_snapshot_config,
-        );
         if let Err(err) = tries.maybe_open_state_snapshot(|prev_block_hash: CryptoHash| {
             let epoch_manager = epoch_manager.read();
             let epoch_id = epoch_manager.get_epoch_id(&prev_block_hash)?;

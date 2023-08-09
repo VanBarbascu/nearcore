@@ -25,7 +25,7 @@ use near_store::flat::FlatStateValuesInliningMigrationHandle;
 use near_store::genesis::initialize_genesis_state;
 use near_store::metadata::DbKind;
 use near_store::metrics::spawn_db_metrics_loop;
-use near_store::{DBCol, Mode, NodeStorage, Store, StoreOpenerError};
+use near_store::{DBCol, Mode, NodeStorage, ShardTries, Store, StoreOpenerError};
 use near_telemetry::TelemetryActor;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -246,10 +246,20 @@ pub fn start_with_config_and_synchronization(
         EpochManager::new_arc_handle(storage.get_hot_store(), &config.genesis.config);
     let shard_tracker =
         ShardTracker::new(TrackedConfig::from_config(&config.client_config), epoch_manager.clone());
+    let flat_storage_manager = FlatStorageManager::new(storage.get_hot_store());
+    let tries = ShardTries::new_with_state_snapshot(
+        storage.get_hot_store(),
+        TrieConfig::from_store_config(&config.config.store),
+        &config.genesis.config.shard_layout.get_shard_uids(),
+        flat_storage_manager.clone(),
+        state_snapshot_config,
+    );
     let runtime = NightshadeRuntime::from_config(
         home_dir,
         storage.get_hot_store(),
+        flat_storage_manager.clone(),
         &config,
+        tries.clone(),
         epoch_manager.clone(),
     );
 
@@ -267,7 +277,10 @@ pub fn start_with_config_and_synchronization(
             let view_runtime = NightshadeRuntime::from_config(
                 home_dir,
                 split_store.clone(),
+                // Is this legit? We are passing the flat storage and trie backed by the hot storage.
+                flat_storage_manager.clone(),
                 &config,
+                tries.clone(),
                 view_epoch_manager.clone(),
             );
             (view_epoch_manager, view_shard_tracker, view_runtime)
