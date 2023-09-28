@@ -247,8 +247,20 @@ fn iterate_over_records(
                     total_supply += account.amount() + account.locked();
                     if account.locked() > 0 {
                         let stake = *validators.get(account_id).map(|(_, s)| s).unwrap_or(&0);
-                        account.set_amount(account.amount() + account.locked() - stake);
-                        account.set_locked(stake);
+                        if let Some(new_amount) =
+                            (account.amount() + account.locked()).checked_sub(stake)
+                        {
+                            account.set_amount(new_amount);
+                            account.set_locked(stake);
+                        } else {
+                            panic!(
+                                "Account balance: Account: {}, Stake: {}, Value: {}, Locked: {}",
+                                account_id.as_str(),
+                                stake,
+                                account.amount(),
+                                account.locked()
+                            );
+                        }
                     }
                 }
                 change_state_record(&mut sr, change_config);
