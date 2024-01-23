@@ -262,6 +262,93 @@ fn get_current_state(
     }
 }
 
+async fn upload_missing_parts(
+    chain_id: &String,
+    runtime: Arc<dyn RuntimeAdapter>,
+    epoch_id: &EpochId,
+    epoch_height: u64,
+    shard_id: ShardId,
+    sync_hash: CryptoHash,
+    sync_prev_prev_hash: &CryptoHash,
+    state_root: &StateRoot,
+    num_parts: u64,
+    chain: &Chain,
+    missing_parts: &Vec<u64>,
+    keep_running: Arc<AtomicBool>,
+    external: &ExternalConnection,
+) -> Option<StateSyncDumpProgress> {
+    let mut parts_to_dump = missing_parts.clone();
+    let timer = Instant::now();
+    let mut dumped_any_state_part = false;
+    let mut failures_cnt = 0;
+    // Stop if the node is stopped.
+    // Note that without this check the state dumping thread is unstoppable, i.e. non-interruptable.
+    while keep_running.load(std::sync::atomic::Ordering::Relaxed)
+        && timer.elapsed().as_secs() <= STATE_DUMP_ITERATION_TIME_LIMIT_SECS
+        && !parts_to_dump.is_empty()
+        && failures_cnt < FAILURES_ALLOWED_PER_ITERATION
+    {
+        let _timer = metrics::STATE_SYNC_DUMP_ITERATION_ELAPSED
+            .with_label_values(&[&shard_id.to_string()])
+            .start_timer();
+
+        let (part_id, selected_idx) = select_random_part_id_with_index(&parts_to_dump);
+
+        let state_part = obtain_and_store_state_part(
+            runtime.as_ref(),
+            shard_id,
+            sync_hash,
+            sync_prev_prev_hash,
+            state_root,
+            part_id,
+            num_parts,
+            chain,
+        );
+        let state_part = match state_part {
+            Ok(state_part) => state_part,
+            Err(err) => {
+                tracing::warn!(target: "state_sync_dump", shard_id, epoch_height, part_id, ?err, "Failed to obtain and store part. Will skip this part.");
+                failures_cnt += 1;
+                continue;
+            }
+        };
+
+        let file_type = StateFileType::StatePart { part_id, num_parts };
+        let location =
+            external_storage_location(chain_id, &epoch_id, epoch_height, shard_id, &file_type);
+        if let Err(err) = external.put_file(file_type, &state_part, shard_id, &location).await {
+            // no need to break if there's an error, we should keep dumping other parts.
+            // reason is we are dumping random selected parts, so it's fine if we are not able to finish all of them
+            tracing::warn!(target: "state_sync_dump", shard_id, epoch_height, part_id, ?err, "Failed to put a store part into external storage. Will skip this part.");
+            failures_cnt += 1;
+            continue;
+        }
+
+        // Remove the dumped part from parts_to_dump so that we draw without replacement.
+        parts_to_dump.swap_remove(selected_idx);
+        update_dumped_size_and_cnt_metrics(
+            &shard_id,
+            epoch_height,
+            Some(state_part.len()),
+            num_parts.checked_sub(parts_to_dump.len() as u64).unwrap(),
+            num_parts,
+        );
+        dumped_any_state_part = true;
+    }
+    if parts_to_dump.is_empty() {
+        Some(StateSyncDumpProgress::AllDumped { epoch_id: epoch_id.clone(), epoch_height })
+    } else if dumped_any_state_part {
+        Some(StateSyncDumpProgress::InProgress {
+            epoch_id: epoch_id.clone(),
+            epoch_height,
+            sync_hash,
+        })
+    } else {
+        // No progress made. Wait before retrying.
+        None
+    }
+}
+
 const FAILURES_ALLOWED_PER_ITERATION: u32 = 10;
 
 async fn state_sync_dump(
@@ -397,90 +484,24 @@ async fn state_sync_dump(
                                 );
                                 Some(StateSyncDumpProgress::AllDumped { epoch_id, epoch_height })
                             }
+
                             Ok(missing_parts) => {
-                                let mut parts_to_dump = missing_parts.clone();
-                                let timer = Instant::now();
-                                let mut dumped_any_state_part = false;
-                                let mut failures_cnt = 0;
-                                // Stop if the node is stopped.
-                                // Note that without this check the state dumping thread is unstoppable, i.e. non-interruptable.
-                                while keep_running.load(std::sync::atomic::Ordering::Relaxed)
-                                    && timer.elapsed().as_secs()
-                                        <= STATE_DUMP_ITERATION_TIME_LIMIT_SECS
-                                    && !parts_to_dump.is_empty()
-                                    && failures_cnt < FAILURES_ALLOWED_PER_ITERATION
-                                {
-                                    let _timer = metrics::STATE_SYNC_DUMP_ITERATION_ELAPSED
-                                        .with_label_values(&[&shard_id.to_string()])
-                                        .start_timer();
-
-                                    let (part_id, selected_idx) =
-                                        select_random_part_id_with_index(&parts_to_dump);
-
-                                    let state_part = obtain_and_store_state_part(
-                                        runtime.as_ref(),
-                                        shard_id,
-                                        sync_hash,
-                                        &sync_prev_prev_hash,
-                                        &state_root,
-                                        part_id,
-                                        num_parts,
-                                        &chain,
-                                    );
-                                    let state_part = match state_part {
-                                        Ok(state_part) => state_part,
-                                        Err(err) => {
-                                            tracing::warn!(target: "state_sync_dump", shard_id, epoch_height, part_id, ?err, "Failed to obtain and store part. Will skip this part.");
-                                            failures_cnt += 1;
-                                            continue;
-                                        }
-                                    };
-
-                                    let file_type = StateFileType::StatePart { part_id, num_parts };
-                                    let location = external_storage_location(
-                                        &chain_id,
-                                        &epoch_id,
-                                        epoch_height,
-                                        shard_id,
-                                        &file_type,
-                                    );
-                                    if let Err(err) = external
-                                        .put_file(file_type, &state_part, shard_id, &location)
-                                        .await
-                                    {
-                                        // no need to break if there's an error, we should keep dumping other parts.
-                                        // reason is we are dumping random selected parts, so it's fine if we are not able to finish all of them
-                                        tracing::warn!(target: "state_sync_dump", shard_id, epoch_height, part_id, ?err, "Failed to put a store part into external storage. Will skip this part.");
-                                        failures_cnt += 1;
-                                        continue;
-                                    }
-
-                                    // Remove the dumped part from parts_to_dump so that we draw without replacement.
-                                    parts_to_dump.swap_remove(selected_idx);
-                                    update_dumped_size_and_cnt_metrics(
-                                        &shard_id,
-                                        epoch_height,
-                                        Some(state_part.len()),
-                                        num_parts.checked_sub(parts_to_dump.len() as u64).unwrap(),
-                                        num_parts,
-                                    );
-                                    dumped_any_state_part = true;
-                                }
-                                if parts_to_dump.is_empty() {
-                                    Some(StateSyncDumpProgress::AllDumped {
-                                        epoch_id,
-                                        epoch_height,
-                                    })
-                                } else if dumped_any_state_part {
-                                    Some(StateSyncDumpProgress::InProgress {
-                                        epoch_id,
-                                        epoch_height,
-                                        sync_hash,
-                                    })
-                                } else {
-                                    // No progress made. Wait before retrying.
-                                    None
-                                }
+                                upload_missing_parts(
+                                    &chain_id,
+                                    runtime.clone(),
+                                    &epoch_id,
+                                    epoch_height,
+                                    shard_id,
+                                    sync_hash,
+                                    &sync_prev_prev_hash,
+                                    &state_root,
+                                    num_parts,
+                                    &chain,
+                                    &missing_parts,
+                                    keep_running.clone(),
+                                    &external,
+                                )
+                                .await
                             }
                         };
                         match (&parts_upload_status, &header_upload_status) {
