@@ -152,6 +152,10 @@ pub(crate) struct NetworkState {
     /// Mutex serializing calls to set_chain_info(), which mutates a bunch of stuff non-atomically.
     /// TODO(gprusak): make it use synchronization primitives in some more canonical way.
     set_chain_info_mutex: Mutex<()>,
+    // Semaphore limiting state_sync connections from validators.
+    //pub validator_state_sync_permits: Arc<tokio::sync::Semaphore>,
+    // Semaphore limiting state_sync connections from non-validators.
+    //pub other_state_sync_permits: Arc<tokio::sync::Semaphore>,
 }
 
 impl NetworkState {
@@ -202,6 +206,11 @@ impl NetworkState {
             config,
             created_at: clock.now(),
             tier1_advertise_proxies_mutex: tokio::sync::Mutex::new(()),
+            /*validator_state_sync_permits: Arc::new(tokio::sync::Semaphore::new(
+                            LIMIT_PENDING_PEERS,
+                        )),
+                        other_state_sync_permits: Arc::new(tokio::sync::Semaphore::new(LIMIT_PENDING_PEERS)),
+            */
         }
     }
 

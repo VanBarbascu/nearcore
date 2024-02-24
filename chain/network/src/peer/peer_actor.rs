@@ -33,12 +33,12 @@ use crate::types::{
     BlockInfo, Disconnect, Handshake, HandshakeFailureReason, PeerMessage, PeerType, ReasonForBan,
 };
 use actix::fut::future::wrap_future;
-use actix::{Actor as _, ActorContext as _, ActorFutureExt as _, AsyncContext as _};
+use actix::{Actor as _, ActorContext as _, ActorFutureExt as _, AsyncContext};
 use lru::LruCache;
 use near_async::messaging::SendAsync;
 use near_async::time;
 use near_crypto::Signature;
-use near_o11y::{handler_debug_span, log_assert, WithSpanContext};
+use near_o11y::{handler_debug_span, log_assert, WithSpanContext, WithSpanContextExt};
 use near_performance_metrics_macros::perf;
 use near_primitives::hash::CryptoHash;
 use near_primitives::network::{AnnounceAccount, PeerId};
@@ -822,6 +822,45 @@ impl PeerActor {
         );
     }
 
+    /// Check if the node can process the state sync request.
+    fn process_state_sync_connection(
+        &self,
+        ctx: &mut <PeerActor as actix::Actor>::Context,
+        msg: PeerMessage,
+    ) {
+        // TODO: check if QPS allows it.
+        // self.network_state
+        let network_state = self.network_state.clone();
+        let self_addr = ctx.address().clone();
+
+        ctx.spawn(wrap_future(async move {
+            //let conn = network_state.connection_store.
+            let response = match msg {
+                PeerMessage::StateRequestHeader(shard_id, sync_hash) => network_state
+                    .client
+                    .send_async(StateRequestHeader { shard_id, sync_hash })
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|response| PeerMessage::VersionedStateResponse(*response.0)),
+                PeerMessage::StateRequestPart(shard_id, sync_hash, part_id) => network_state
+                    .client
+                    .send_async(StateRequestPart { shard_id, sync_hash, part_id })
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|response| PeerMessage::VersionedStateResponse(*response.0)),
+                _ => None,
+            };
+            if let Some(response) = response {
+                self_addr
+                    .send(SendMessage { message: Arc::new(response) }.with_span_context())
+                    .await
+                    .unwrap();
+            };
+        }));
+    }
+
     // Send full RoutingTable.
     fn sync_routing_table(&self) {
         let mut known_edges: Vec<Edge> =
@@ -844,7 +883,7 @@ impl PeerActor {
     }
 
     fn handle_msg_connecting(&mut self, ctx: &mut actix::Context<Self>, msg: PeerMessage) {
-        match (&mut self.peer_status, msg) {
+        match (&mut self.peer_status, msg.clone()) {
             (
                 PeerStatus::Connecting(_, ConnectingStatus::Outbound { handshake_spec, .. }),
                 PeerMessage::HandshakeFailure(peer_info, reason),
@@ -925,6 +964,11 @@ impl PeerActor {
             }
             (PeerStatus::Connecting { .. }, PeerMessage::Tier2Handshake(msg)) => {
                 self.process_handshake(ctx, tcp::Tier::T2, msg)
+            }
+
+            (PeerStatus::Connecting { .. }, PeerMessage::StateRequestPart(..))
+            | (PeerStatus::Connecting { .. }, PeerMessage::StateRequestHeader(..)) => {
+                self.process_state_sync_connection(ctx, msg.clone())
             }
             (_, msg) => {
                 tracing::warn!(target:"network","unexpected message during handshake: {}",msg)
@@ -1759,6 +1803,7 @@ impl actix::Handler<stream::Frame> for PeerActor {
     }
 }
 
+/// TODO: Use this
 impl actix::Handler<WithSpanContext<SendMessage>> for PeerActor {
     type Result = ();
 
