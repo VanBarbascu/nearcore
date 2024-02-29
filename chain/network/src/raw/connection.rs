@@ -230,25 +230,7 @@ impl Connection {
         tracked_shards: Vec<ShardId>,
         recv_timeout: Duration,
     ) -> Result<Self, ConnectError> {
-        let secret_key = SecretKey::from_random(KeyType::ED25519);
-        let my_peer_id = PeerId::new(secret_key.public_key());
-
-        let start = Instant::now();
-        let stream = tcp::Stream::connect(&PeerInfo::new(peer_id.clone(), addr), tcp::Tier::T2)
-            .await
-            .map_err(ConnectError::TcpConnect)?;
-        tracing::info!(
-            target: "network", "Connection to {}@{:?} established. latency: {}",
-            &peer_id, &addr, start.elapsed(),
-        );
-        let mut peer = Self {
-            stream: PeerStream::new(stream, recv_timeout),
-            peer_id,
-            secret_key,
-            my_peer_id,
-            route_cache: lru::LruCache::new(1_000_000),
-            borsh_message_expected: false,
-        };
+        let mut peer = Self::connect_raw(addr, peer_id, recv_timeout).await?;
         peer.do_handshake(
             my_protocol_version.unwrap_or(PROTOCOL_VERSION),
             chain_id,
@@ -258,6 +240,36 @@ impl Connection {
         )
         .await?;
 
+        Ok(peer)
+    }
+
+    /// Connect to a NEAR node at `peer_id`@`addr`.
+    pub async fn connect_raw(
+        addr: SocketAddr,
+        peer_id: PeerId,
+        recv_timeout: Duration,
+    ) -> Result<Self, ConnectError> {
+        let secret_key = SecretKey::from_random(KeyType::ED25519);
+        let my_peer_id = PeerId::new(secret_key.public_key());
+
+        let start = Instant::now();
+
+        // When using a raw connection, the tier parameter is not taken into account so we are setting it to a random value.
+        let stream = tcp::Stream::connect(&PeerInfo::new(peer_id.clone(), addr), tcp::Tier::T2)
+            .await
+            .map_err(ConnectError::TcpConnect)?;
+        tracing::info!(
+            target: "network", "Connection to {}@{:?} established. latency: {}",
+            &peer_id, &addr, start.elapsed(),
+        );
+        let peer = Self {
+            stream: PeerStream::new(stream, recv_timeout),
+            peer_id,
+            secret_key,
+            my_peer_id,
+            route_cache: lru::LruCache::new(1_000_000),
+            borsh_message_expected: false,
+        };
         Ok(peer)
     }
 

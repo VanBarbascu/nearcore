@@ -1,11 +1,9 @@
 use anyhow::Context;
 use near_async::time;
-use near_network::raw::{ConnectError, Connection, DirectMessage, Message};
-use near_network::types::HandshakeFailureReason;
+use near_network::raw::{Connection, DirectMessage, Message};
 use near_primitives::hash::CryptoHash;
 use near_primitives::network::PeerId;
-use near_primitives::types::{AccountId, BlockHeight, ShardId};
-use near_primitives::version::ProtocolVersion;
+use near_primitives::types::{AccountId, ShardId};
 use sha2::Digest;
 use sha2::Sha256;
 use std::collections::HashMap;
@@ -88,10 +86,6 @@ impl std::fmt::Display for PeerIdentifier {
 async fn state_parts_from_node(
     block_hash: CryptoHash,
     shard_id: ShardId,
-    chain_id: &str,
-    genesis_hash: CryptoHash,
-    head_height: BlockHeight,
-    protocol_version: Option<ProtocolVersion>,
     peer_id: PeerId,
     peer_addr: SocketAddr,
     ttl: u8,
@@ -103,32 +97,14 @@ async fn state_parts_from_node(
     assert!(start_part_id < num_parts && num_parts > 0, "{}/{}", start_part_id, num_parts);
     let mut app_info = AppInfo::new();
 
-    let mut peer = match Connection::connect(
+    let mut peer = match Connection::connect_raw(
         peer_addr,
         peer_id.clone(),
-        protocol_version,
-        chain_id,
-        genesis_hash,
-        head_height,
-        vec![0],
-        time::Duration::seconds(recv_timeout_seconds.into())).await {
+        time::Duration::seconds(recv_timeout_seconds.into()),
+    )
+    .await
+    {
         Ok(p) => p,
-        Err(ConnectError::HandshakeFailure(reason)) => {
-            match reason {
-                HandshakeFailureReason::ProtocolVersionMismatch { version, oldest_supported_version } => anyhow::bail!(
-                    "Received Handshake Failure: {:?}. Try running again with --protocol-version between {} and {}",
-                    reason, oldest_supported_version, version
-                ),
-                HandshakeFailureReason::GenesisMismatch(_) => anyhow::bail!(
-                    "Received Handshake Failure: {:?}. Try running again with --chain-id and --genesis-hash set to these values.",
-                    reason,
-                ),
-                HandshakeFailureReason::InvalidTarget => anyhow::bail!(
-                    "Received Handshake Failure: {:?}. Is the public key given with --peer correct?",
-                    reason,
-                ),
-            }
-        }
         Err(e) => {
             anyhow::bail!("Error connecting to {:?}: {}", peer_addr, e);
         }

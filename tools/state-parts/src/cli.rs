@@ -101,10 +101,6 @@ impl StatePartsCommand {
             crate::state_parts_from_node(
                 self.block_hash,
                 self.shard_id,
-                &self.chain_id,
-                genesis_hash,
-                self.head_height.unwrap_or(0),
-                self.protocol_version,
                 peer.id.clone(),
                 peer.addr.unwrap(),
                 self.ttl,
