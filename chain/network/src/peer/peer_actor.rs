@@ -38,7 +38,7 @@ use lru::LruCache;
 use near_async::messaging::SendAsync;
 use near_async::time;
 use near_crypto::Signature;
-use near_o11y::{handler_debug_span, log_assert, WithSpanContext, WithSpanContextExt};
+use near_o11y::{handler_debug_span, log_assert, WithSpanContext};
 use near_performance_metrics_macros::perf;
 use near_primitives::hash::CryptoHash;
 use near_primitives::network::{AnnounceAccount, PeerId};
@@ -362,6 +362,7 @@ impl PeerActor {
         }
         match self.peer_status {
             PeerStatus::Connecting { .. } => None,
+            PeerStatus::OneShotConnection { .. } => Some(Encoding::Proto),
             PeerStatus::Ready { .. } => Some(Encoding::Borsh),
         }
     }
@@ -824,41 +825,69 @@ impl PeerActor {
 
     /// Check if the node can process the state sync request.
     fn process_state_sync_connection(
-        &self,
+        &mut self,
         ctx: &mut <PeerActor as actix::Actor>::Context,
         msg: PeerMessage,
     ) {
-        // TODO: check if QPS allows it.
+        // TODO: check if QPS allows to process the connextion
         // self.network_state
         let network_state = self.network_state.clone();
-        let self_addr = ctx.address().clone();
-
-        ctx.spawn(wrap_future(async move {
-            //let conn = network_state.connection_store.
-            let response = match msg {
-                PeerMessage::StateRequestHeader(shard_id, sync_hash) => network_state
-                    .client
-                    .send_async(StateRequestHeader { shard_id, sync_hash })
-                    .await
-                    .ok()
-                    .flatten()
-                    .map(|response| PeerMessage::VersionedStateResponse(*response.0)),
-                PeerMessage::StateRequestPart(shard_id, sync_hash, part_id) => network_state
-                    .client
-                    .send_async(StateRequestPart { shard_id, sync_hash, part_id })
-                    .await
-                    .ok()
-                    .flatten()
-                    .map(|response| PeerMessage::VersionedStateResponse(*response.0)),
-                _ => None,
-            };
-            if let Some(response) = response {
-                self_addr
-                    .send(SendMessage { message: Arc::new(response) }.with_span_context())
-                    .await
-                    .unwrap();
-            };
-        }));
+        let send_message_timeout = self.network_state.config.state_sync_timeout;
+        //let self_addr = ctx.address().clone();
+        // self.network_state.send_message_to_account(clock, account_id, msg)
+        ctx.wait(
+            wrap_future({
+                async move {
+                    //TODO: Check if rate limiting allows us to process this request.
+                    //network_state.inbound_state_sync_rate_limiter.can_process()
+                    ()
+                }
+            })
+            .map(move |_, act: &mut PeerActor, ctx| {
+                act.peer_status = PeerStatus::OneShotConnection();
+                // Respond to handshake if it's inbound and connection was consolidated.
+                ctx.spawn(
+                    wrap_future(async move {
+                        match msg {
+                            PeerMessage::StateRequestHeader(shard_id, sync_hash) => network_state
+                                .client
+                                .send_async(StateRequestHeader { shard_id, sync_hash })
+                                .await
+                                .ok()
+                                .flatten()
+                                .map(|response| PeerMessage::VersionedStateResponse(*response.0)),
+                            PeerMessage::StateRequestPart(shard_id, sync_hash, part_id) => {
+                                network_state
+                                    .client
+                                    .send_async(StateRequestPart { shard_id, sync_hash, part_id })
+                                    .await
+                                    .ok()
+                                    .flatten()
+                                    .map(|response| {
+                                        PeerMessage::VersionedStateResponse(*response.0)
+                                    })
+                            }
+                            _ => None,
+                        }
+                    })
+                    .map(move |response, act: &mut PeerActor, ctx| {
+                        let mut timeout = time::Duration::ZERO;
+                        if let Some(response) = response {
+                            act.send_message_or_log(&response);
+                            timeout = send_message_timeout;
+                        }
+                        near_performance_metrics::actix::run_later(
+                            ctx,
+                            timeout.try_into().unwrap(),
+                            move |act, ctx| {
+                                tracing::debug!(target: "network", "State sync response sent, closing the connection with {}", act.peer_info);
+                                act.stop(ctx, ClosingReason::DisconnectMessage);
+                            },
+                        );
+                    }),
+                );
+            }),
+        );
     }
 
     // Send full RoutingTable.
@@ -1659,7 +1688,7 @@ impl actix::Actor for PeerActor {
             // If PeerActor is in Connecting state, then
             // it was not registered in the NetworkState,
             // so there is nothing to be done.
-            PeerStatus::Connecting(..) => {
+            PeerStatus::Connecting(..) | PeerStatus::OneShotConnection(..) => {
                 // TODO(gprusak): reporting ConnectionClosed event is quite scattered right now and
                 // it is very ugly: it may happen here, in spawn_inner, or in NetworkState::unregister().
                 // Centralize it, once we get rid of actix.
@@ -1766,6 +1795,11 @@ impl actix::Handler<stream::Frame> for PeerActor {
         }
         match &self.peer_status {
             PeerStatus::Connecting { .. } => self.handle_msg_connecting(ctx, peer_msg),
+            PeerStatus::OneShotConnection() => {
+                // We expect to handle only one request over this connection.
+                tracing::warn!(target: "network", "Received followup messages {} over OneShotConnection {:?}. Ignoring", peer_msg, self.peer_type);
+                return;
+            }
             PeerStatus::Ready(conn) => {
                 if self.closing_reason.is_some() {
                     tracing::warn!(target: "network", "Received {} from closing connection {:?}. Ignoring", peer_msg, self.peer_type);
@@ -1803,7 +1837,6 @@ impl actix::Handler<stream::Frame> for PeerActor {
     }
 }
 
-/// TODO: Use this
 impl actix::Handler<WithSpanContext<SendMessage>> for PeerActor {
     type Result = ();
 
@@ -1863,6 +1896,8 @@ enum ConnectingStatus {
 enum PeerStatus {
     /// Handshake in progress.
     Connecting(HandshakeSignalSender, ConnectingStatus),
+    /// Ready to process one shot request.
+    OneShotConnection(),
     /// Ready to go.
     Ready(Arc<connection::Connection>),
 }
