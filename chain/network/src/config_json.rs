@@ -59,6 +59,10 @@ fn default_snapshot_hosts_cache_size() -> u32 {
 fn default_peer_expiration_duration() -> Duration {
     Duration::seconds(7 * 24 * 60 * 60)
 }
+/// Maximum time to wait for peer to receive the state sync part.
+fn default_state_sync_timeout() -> Duration {
+    Duration::seconds(10)
+}
 
 /// This is a list of public STUN servers provided by Google,
 /// which are known to have good availability. To avoid trusting
@@ -116,6 +120,9 @@ pub struct Config {
     /// if we are an archival node.
     #[serde(default = "default_archival_peer_connections_lower_bound")]
     pub archival_peer_connections_lower_bound: u32,
+    #[serde(default = "default_state_sync_timeout")]
+    #[serde(with = "near_async::time::serde_duration_as_std")]
+    pub state_sync_timeout: Duration,
     /// Handshake timeout.
     #[serde(with = "near_async::time::serde_duration_as_std")]
     pub handshake_timeout: Duration,
@@ -304,6 +311,7 @@ impl Default for Config {
             peer_recent_time_window: default_peer_recent_time_window(),
             safe_set_size: default_safe_set_size(),
             archival_peer_connections_lower_bound: default_archival_peer_connections_lower_bound(),
+            state_sync_timeout: default_state_sync_timeout(),
             handshake_timeout: Duration::seconds(20),
             skip_sync_wait: false,
             peer_states_cache_size: default_peer_states_cache_size(),

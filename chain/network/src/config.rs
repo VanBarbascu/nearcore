@@ -96,6 +96,8 @@ pub struct NetworkConfig {
 
     pub peer_store: peer_store::Config,
     pub snapshot_hosts: snapshot_hosts::Config,
+    /// Maximum time to wait for the peer to receive the message before closing the connection.
+    pub state_sync_timeout: time::Duration,
     pub whitelist_nodes: Vec<PeerInfo>,
     pub handshake_timeout: time::Duration,
 
@@ -288,6 +290,7 @@ impl NetworkConfig {
                 snapshot_hosts_cache_size: cfg.snapshot_hosts_cache_size,
                 part_selection_cache_batch_size: 10,
             },
+            state_sync_timeout: cfg.state_sync_timeout.try_into()?,
             whitelist_nodes: if cfg.whitelist_nodes.is_empty() {
                 vec![]
             } else {
@@ -378,6 +381,7 @@ impl NetworkConfig {
                 part_selection_cache_batch_size: 10,
             },
             whitelist_nodes: vec![],
+            state_sync_timeout: time::Duration::seconds(5),
             handshake_timeout: time::Duration::seconds(5),
             connect_to_reliable_peers_on_startup: true,
             monitor_peers_max_period: time::Duration::seconds(100),
