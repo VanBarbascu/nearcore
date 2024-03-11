@@ -1,8 +1,7 @@
-use crate::client::{ClientSenderForNetwork, SetNetworkInfo};
-use crate::config;
+use crate::client::{ClientSenderForNetwork, SetNetworkInfo, StateResponse};
 use crate::debug::{DebugStatus, GetDebugStatus};
-use crate::network_protocol;
 use crate::network_protocol::SyncSnapshotHosts;
+use crate::network_protocol::{self, PeerAddr};
 use crate::network_protocol::{
     Disconnect, Edge, PeerIdOrHash, PeerMessage, Ping, Pong, RawRoutedMessage, RoutedMessageBody,
 };
@@ -10,6 +9,7 @@ use crate::peer::peer_actor::PeerActor;
 use crate::peer_manager::connection;
 use crate::peer_manager::network_state::{NetworkState, WhitelistNode};
 use crate::peer_manager::peer_store;
+use crate::raw::{Connection, DirectMessage};
 use crate::shards_manager::ShardsManagerRequestFromNetwork;
 use crate::stats::metrics;
 use crate::store;
@@ -19,8 +19,9 @@ use crate::types::{
     NetworkResponses, PeerInfo, PeerManagerMessageRequest, PeerManagerMessageResponse, PeerType,
     SetChainInfo, SnapshotHostInfo,
 };
+use crate::{config, peer};
 use actix::fut::future::wrap_future;
-use actix::{Actor as _, AsyncContext as _};
+use actix::{Actor as _, ActorFutureExt, AsyncContext as _};
 use anyhow::Context as _;
 use near_async::messaging::{SendAsync, Sender};
 use near_async::time;
@@ -730,7 +731,7 @@ impl PeerManagerActor {
         );
     }
 
-    #[perf]
+    // #[perf]
     fn handle_msg_network_requests(
         &mut self,
         msg: NetworkRequests,
@@ -784,14 +785,41 @@ impl PeerManagerActor {
                 }
             }
             NetworkRequests::StateRequestPart { shard_id, sync_hash, part_id, peer_id } => {
-                if self.state.tier2.send_message(
-                    peer_id,
-                    Arc::new(PeerMessage::StateRequestPart(shard_id, sync_hash, part_id)),
-                ) {
-                    NetworkResponses::NoResponse
-                } else {
-                    NetworkResponses::RouteNotFound
-                }
+                let msg = DirectMessage::StateRequestPart(shard_id, sync_hash, part_id);
+                let peer_id = peer_id.clone();
+                let peer_addr = match self.state.peer_store.load().get(&peer_id) {
+                    Some(known_peer_state) => {
+                        if let Some(addr) = known_peer_state.peer_info.addr {
+                            Some(PeerAddr { addr, peer_id: peer_id.clone() })
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                };
+
+                // Open a new connection and send the request. Wait for the response. Pass it back to client actor.
+                ctx.spawn(wrap_future(async move {}).map(
+                    |msg, act: &mut PeerManagerActor, ctx| {
+                        match Connection::one_shot_request(
+                            peer_addr,
+                            peer_id.clone(),
+                            msg,
+                            time::Duration::seconds(recv_timeout_seconds.into()),
+                        )
+                        .await
+                        {
+                            Ok(DirectMessage::VersionedStateResponse(sri)) => {
+                                act.state.client.state_response.send(Arc::new(sri))
+                            }
+                            Err(e) => {
+                                tracing::warn!("Error connecting to {:?}: {}", peer_addr, e);
+                            }
+                            _ => todo!(),
+                        };
+                    },
+                ));
+                NetworkResponses::NoResponse
             }
             NetworkRequests::SnapshotHostInfo { sync_hash, epoch_height, mut shards } => {
                 if shards.len() > MAX_SHARDS_PER_SNAPSHOT_HOST_INFO {

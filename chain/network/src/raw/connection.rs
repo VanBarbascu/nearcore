@@ -217,6 +217,23 @@ fn new_handshake(
     })
 }
 
+async fn one_shot_request(
+    peer_addr: SocketAddr,
+    peer_id: PeerId,
+    msg: DirectMessage,
+    recv_timeout_seconds: Duration,
+) -> anyhow::Result<Message> {
+    let mut peer = Connection::connect_raw(peer_addr, peer_id, recv_timeout_seconds).await?;
+    tracing::debug!(target: "network", "Sending one shot ");
+    peer.send_message(msg).await?;
+
+    let (response, _ts) = tokio::time::timeout(recv_timeout_seconds.try_into()?, peer.recv())
+        .await
+        .map_err(|err| anyhow::format_err!("Timeout error: {err}"))?
+        .map_err(|err| anyhow::format_err!("Receive error: {err}"))?;
+    Ok(response)
+}
+
 impl Connection {
     /// Connect to the NEAR node at `peer_id`@`addr`. The inputs are used to build out handshake,
     /// and this function will return a `Peer` when a handshake has been received successfully.
