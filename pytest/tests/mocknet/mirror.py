@@ -426,6 +426,13 @@ def update_binaries_cmd(args, traffic_generator, nodes):
     pmap(neard_runner_update_binaries, nodes + [traffic_generator])
 
 
+def run_remote_cmd(args, traffic_generator, nodes):
+    if args.all or args.traffic:
+        cmd_utils.run_cmd(traffic_generator, args.cmd)
+    if args.all or args.nodes:
+        pmap(lambda node: cmd_utils.run_cmd(node, args.cmd), nodes)
+
+
 if __name__ == '__main__':
     parser = ArgumentParser(description='Run a load test')
     parser.add_argument('--chain-id', type=str, required=True)
@@ -533,6 +540,20 @@ if __name__ == '__main__':
         'Update the neard binaries by re-downloading them. The same urls are used.'
     )
     update_binaries_parser.set_defaults(func=update_binaries_cmd)
+
+    run_cmd_parser = subparsers.add_parser('run-cmd',
+                                           help='''Run the cmd on the hosts.''')
+    run_cmd_parser.add_argument('--cmd', type=str)
+    run_cmd_parser.add_argument('--all',
+                                action='store_true',
+                                help='Run on all hosts')
+    run_cmd_parser.add_argument('--nodes',
+                                action='store_true',
+                                help='Run on nodes')
+    run_cmd_parser.add_argument('--traffic',
+                                action='store_true',
+                                help='Run on traffic host')
+    run_cmd_parser.set_defaults(func=run_remote_cmd)
 
     args = parser.parse_args()
 
