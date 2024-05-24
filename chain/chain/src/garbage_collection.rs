@@ -12,7 +12,7 @@ use near_primitives::state_sync::{StateHeaderKey, StatePartKey};
 use near_primitives::types::{BlockHeight, BlockHeightDelta, EpochId, NumBlocks, ShardId};
 use near_primitives::utils::{get_block_shard_id, get_outcome_id_block_hash, index_to_bytes};
 use near_store::flat::store_helper;
-use near_store::{DBCol, KeyForStateChanges, ShardTries, ShardUId};
+use near_store::{genesis, DBCol, KeyForStateChanges, ShardTries, ShardUId, HEAD_KEY};
 
 use crate::types::RuntimeAdapter;
 use crate::{metrics, Chain, ChainStoreAccess, ChainStoreUpdate};
@@ -294,6 +294,11 @@ impl Chain {
             for block_hash in blocks_current_height {
                 let epoch_manager = self.epoch_manager.clone();
                 let mut chain_store_update = self.mut_chain_store().store_update();
+                // If it needs to GC the head block, reset the head to genesis so it does not point
+                // to a block that is not in the DB.
+                if block_hash == head.last_block_hash {
+                    chain_store_update.reset_head_to_genesis(self.genesis_block());
+                }
                 if !tail_prev_block_cleaned {
                     let prev_block_hash =
                         *chain_store_update.get_block_header(&block_hash)?.prev_hash();
@@ -1005,6 +1010,12 @@ impl<'a> ChainStoreUpdate<'a> {
             #[cfg(feature = "new_epoch_sync")]
             DBCol::EpochSyncInfo => unreachable!(),
         }
+        self.merge(store_update);
+    }
+
+    fn reset_head_to_genesis(&mut self, genesis_block: Block) {
+        let mut store_update = self.store().store_update();
+        store_update.set_ser(DBCol::BlockMisc, HEAD_KEY)?;
         self.merge(store_update);
     }
 }
