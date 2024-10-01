@@ -4519,6 +4519,7 @@ dependencies = [
  "bs58 0.4.0",
  "clap",
  "ed25519-dalek",
+ "futures",
  "hex",
  "hkdf",
  "near-async",

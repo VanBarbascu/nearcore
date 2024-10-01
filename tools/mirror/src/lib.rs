@@ -37,6 +37,8 @@ use std::time::Duration;
 use strum::IntoEnumIterator;
 use tokio::sync::mpsc;
 
+use futures::future::join_all;
+
 mod chain_tracker;
 pub mod cli;
 pub mod genesis;
@@ -877,58 +879,74 @@ impl<T: ChainAccess> TxMirror<T> {
         })
     }
 
+    async fn send_transaction(
+        target_client: &Addr<ClientActor>,
+        tx: &mut TargetChainTx,
+    ) -> anyhow::Result<()> {
+        match tx {
+            TargetChainTx::Ready(tx) => {
+                match target_client
+                    .send(
+                        ProcessTxRequest {
+                            transaction: tx.target_tx.clone(),
+                            is_forwarded: false,
+                            check_only: false,
+                        }
+                        .with_span_context(),
+                    )
+                    .await?
+                {
+                    ProcessTxResponse::RequestRouted => {
+                        crate::metrics::TRANSACTIONS_SENT.with_label_values(&["ok"]).inc();
+                        tx.sent_successfully = true;
+                    }
+                    ProcessTxResponse::InvalidTx(e) => {
+                        // TODO: here if we're getting an error because the tx was already included, it is possible
+                        // that some other instance of this code ran and made progress already. For now we can assume
+                        // only once instance of this code will run, but this is the place to detect if that's not the case.
+                        tracing::error!(
+                            target: "mirror", "Tried to send an invalid tx for ({}, {:?}) from {}: {:?}",
+                            tx.target_tx.transaction.signer_id(), tx.target_tx.transaction.public_key(), &tx.provenance, e
+                        );
+                        crate::metrics::TRANSACTIONS_SENT.with_label_values(&["invalid"]).inc();
+                    }
+                    r => {
+                        tracing::error!(
+                            target: "mirror", "Unexpected response sending tx from {}: {:?}. The transaction was not sent",
+                            &tx.provenance, r
+                        );
+                        crate::metrics::TRANSACTIONS_SENT
+                            .with_label_values(&["internal_error"])
+                            .inc();
+                    }
+                }
+            }
+            TargetChainTx::AwaitingNonce(tx) => {
+                // TODO: here we should just save this transaction for later and send it when it's known
+                tracing::warn!(
+                    target: "mirror", "skipped sending transaction for ({}, {:?}) because valid target chain nonce not known",
+                    tx.target_tx.signer_id(), tx.target_tx.public_key()
+                );
+            }
+        }
+        Ok(())
+    }
+
     async fn send_transactions<'a, I: Iterator<Item = &'a mut TargetChainTx>>(
         target_client: &Addr<ClientActor>,
         txs: I,
     ) -> anyhow::Result<()> {
-        for tx in txs {
-            match tx {
-                TargetChainTx::Ready(tx) => {
-                    match target_client
-                        .send(
-                            ProcessTxRequest {
-                                transaction: tx.target_tx.clone(),
-                                is_forwarded: false,
-                                check_only: false,
-                            }
-                            .with_span_context(),
-                        )
-                        .await?
-                    {
-                        ProcessTxResponse::RequestRouted => {
-                            crate::metrics::TRANSACTIONS_SENT.with_label_values(&["ok"]).inc();
-                            tx.sent_successfully = true;
-                        }
-                        ProcessTxResponse::InvalidTx(e) => {
-                            // TODO: here if we're getting an error because the tx was already included, it is possible
-                            // that some other instance of this code ran and made progress already. For now we can assume
-                            // only once instance of this code will run, but this is the place to detect if that's not the case.
-                            tracing::error!(
-                                target: "mirror", "Tried to send an invalid tx for ({}, {:?}) from {}: {:?}",
-                                tx.target_tx.transaction.signer_id(), tx.target_tx.transaction.public_key(), &tx.provenance, e
-                            );
-                            crate::metrics::TRANSACTIONS_SENT.with_label_values(&["invalid"]).inc();
-                        }
-                        r => {
-                            tracing::error!(
-                                target: "mirror", "Unexpected response sending tx from {}: {:?}. The transaction was not sent",
-                                &tx.provenance, r
-                            );
-                            crate::metrics::TRANSACTIONS_SENT
-                                .with_label_values(&["internal_error"])
-                                .inc();
-                        }
-                    }
-                }
-                TargetChainTx::AwaitingNonce(tx) => {
-                    // TODO: here we should just save this transaction for later and send it when it's known
-                    tracing::warn!(
-                        target: "mirror", "skipped sending transaction for ({}, {:?}) because valid target chain nonce not known",
-                        tx.target_tx.signer_id(), tx.target_tx.public_key()
-                    );
+        let futures = txs.into_iter().map(|tx| Self::send_transaction(target_client, tx));
+        // Run all requests concurrently
+        for r in join_all(futures).await {
+            match r {
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::error!(target: "mirror", "Error calling client: {:?}", e);
                 }
             }
         }
+
         Ok(())
     }
 
