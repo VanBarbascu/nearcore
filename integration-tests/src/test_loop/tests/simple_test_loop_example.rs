@@ -64,7 +64,8 @@ fn test_client_with_simple_test_loop() {
     initialize_genesis_state(store.clone(), &genesis, None);
 
     let chain_genesis = ChainGenesis::new(&genesis.config);
-    let epoch_manager = EpochManager::new_arc_handle(store.clone(), &genesis.config);
+    let epoch_manager =
+        EpochManager::new_arc_handle(store.clone(), &genesis.config, Some(Path::new(".")));
     let shard_tracker = ShardTracker::new(TrackedConfig::AllShards, epoch_manager.clone());
     let runtime_adapter = NightshadeRuntime::test(
         Path::new("."),
