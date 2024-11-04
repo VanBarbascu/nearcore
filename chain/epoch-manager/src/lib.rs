@@ -215,7 +215,9 @@ impl EpochManager {
         }
 
         let config_dir = home_dir.map(|home_dir| home_dir.join("epoch_configs"));
+        tracing::info!(target: "epoch_manager", "maybe loading epoch configs from {:?}", config_dir);
         let epoch_config_store = if config_dir.as_ref().map_or(false, |dir| dir.exists()) {
+            tracing::info!(target: "epoch_manager", "Loading epoch configs from {:?}", config_dir);
             EpochConfigStore::for_chain_id(chain_id, config_dir).unwrap()
         } else if chain_id.starts_with("test-chain-") {
             let epoch_config = EpochConfig::from(genesis_config);
