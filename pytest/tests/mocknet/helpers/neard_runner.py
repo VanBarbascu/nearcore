@@ -565,24 +565,28 @@ class NeardRunner:
                         'genesis_time': genesis_time,
                     }, f)
 
+    def _update_config(self, key_value, config):
+        [key, value] = key_value.split("=", 1)
+        key_item_list = key.split(".")
+
+        object = config
+        for key_item in key_item_list[:-1]:
+            if key_item not in object:
+                object[key_item] = {}
+            object = object[key_item]
+
+        value = json.loads(value)
+
+        object[key_item_list[-1]] = value
+
+    # TODO: Allow a list of key_value pairs to be passed in the request
     def do_update_config(self, key_value):
         with self.lock:
-            logging.info(f'updating config with {key_value}')
             with open(self.target_near_home_path('config.json'), 'r') as f:
                 config = json.load(f)
 
-            [key, value] = key_value.split("=", 1)
-            key_item_list = key.split(".")
-
-            object = config
-            for key_item in key_item_list[:-1]:
-                if key_item not in object:
-                    object[key_item] = {}
-                object = object[key_item]
-
-            value = json.loads(value)
-
-            object[key_item_list[-1]] = value
+            logging.info(f'updating config with {key_value}')
+            self._update_config(key_value, config)
 
             with open(self.target_near_home_path('config.json'), 'w') as f:
                 json.dump(config, f, indent=2)
