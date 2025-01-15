@@ -92,6 +92,11 @@ pub struct Config {
     ///   ed25519:86EtEy7epneKyrcJwSWP7zsisTkfDRH5CFVszt4qiQYw@31.192.22.209:24567
     ///   ed25519:86EtEy7epneKyrcJwSWP7zsisTkfDRH5CFVszt4qiQYw@nearnode.com:24567
     pub boot_nodes: String,
+    /// Comma separated list of RPC nodes to query for peers.
+    /// Examples:
+    ///   http://99.88.77.66:3030
+    ///   https://rpc.mainnet.near.org
+    pub boot_rpc_nodes: String,
     /// Comma separated list of whitelisted nodes. Inbound connections from the nodes on
     /// the whitelist are accepted even if the limit of the inbound connection has been reached.
     /// For each whitelisted node specifying both PeerId and one of IP:port or Host:port is required:

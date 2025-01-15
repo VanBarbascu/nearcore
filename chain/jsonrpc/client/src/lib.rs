@@ -13,7 +13,7 @@ use near_primitives::hash::CryptoHash;
 use near_primitives::types::{BlockId, BlockReference, EpochReference, MaybeBlockId, ShardId};
 use near_primitives::views::validator_stake_view::ValidatorStakeView;
 use near_primitives::views::{
-    BlockView, ChunkView, EpochValidatorInfo, GasPriceView, StatusResponse,
+    BlockView, ChunkView, EpochValidatorInfo, GasPriceView, NetworkInfoView, StatusResponse
 };
 use std::time::Duration;
 
@@ -276,6 +276,12 @@ impl JsonRpcClient {
             _ => EpochReference::Latest,
         };
         call_method(&self.client, &self.server_addr, "validators", epoch_reference)
+    }
+
+    pub fn network_info(
+        &self,
+    ) -> RpcRequest<NetworkInfoView> {
+        call_method(&self.client, &self.server_addr, "network_info", None::<()>)
     }
 }
 

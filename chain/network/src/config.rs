@@ -246,6 +246,51 @@ impl NetworkConfig {
         }
     }
 
+    /*fn get_boot_nodes_from_rpc(rpc_url: &str) -> anyhow::Result<Vec<PeerAddr>> {
+        use near_jsonrpc::client::{new_client, JsonRpcClient};
+        let rpc_server_addr = rpc_url.parse::<std::net::SocketAddr>()?;
+        let rpc_client =  new_client(&rpc_server_addr);
+        let response = rpc_client.
+        let peers: Vec<PeerInfo> = response.json()?;
+        Ok(peers
+            .into_iter()
+            .filter_map(|peer| {
+                if let Some(addr) = peer.addr {
+                    Some(PeerAddr { addr, peer_id: peer.peer_id })
+                } else {
+                    None
+                }
+            })
+            .collect())
+    }
+
+    fn build_boot_nodes(
+        cfg: crate::config_json::Config
+    ) -> anyhow::Result<Vec<PeerAddr>> {
+        let mut boot_nodes = if cfg.boot_nodes.is_empty() {
+            vec![]
+        } else {
+            cfg.boot_nodes
+                .split(',')
+                .map(|chunk| chunk.parse())
+                .collect::<Result<_, _>>()
+                .context("boot_nodes")?
+        };
+        
+        boot_nodes.extend(
+            if cfg.boot_rpc_nodes.is_empty() {
+                vec![]
+            } else {
+                cfg.boot_rpc_nodes
+                    .split(',')
+                    .map(|chunk| get_boot_nodes_from_rpc(chunk))
+                    .collect::<Result<_, _>>().flatten()
+                    .context("boot_rpc_nodes")?
+            },
+        );
+        Ok(boot_nodes)
+    }
+*/
     pub fn new(
         cfg: crate::config_json::Config,
         node_key: SecretKey,
@@ -300,15 +345,7 @@ impl NetworkConfig {
                 )),
             },
             peer_store: peer_store::Config {
-                boot_nodes: if cfg.boot_nodes.is_empty() {
-                    vec![]
-                } else {
-                    cfg.boot_nodes
-                        .split(',')
-                        .map(|chunk| chunk.parse())
-                        .collect::<Result<_, _>>()
-                        .context("boot_nodes")?
-                },
+                boot_nodes: vec![],//build_boot_nodes(cfg.boot_nodes, cfg.boot_rpc_nodes)?,
                 blacklist: cfg
                     .blacklist
                     .iter()
