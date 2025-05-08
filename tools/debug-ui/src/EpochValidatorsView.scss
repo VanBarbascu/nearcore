@@ -134,12 +134,16 @@
     background-color: thistle;
 }
 
-.chunk-producer {
+.chunk-producer-set {
     @extend .validator-role;
     background-color: lightblue;
 }
+.new-chunk-producer-set {
+    @extend .validator-role;
+    background-color: rgb(135, 217, 64);
+}
 .new-chunk-producer {
-    color: red;
+    color: gray;
 }
 .old-chunk-producer {
     color: black;

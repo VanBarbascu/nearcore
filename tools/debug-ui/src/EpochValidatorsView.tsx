@@ -513,7 +513,7 @@ function drawStakeBar(stake: number | null, maxStake: number, totalStake: number
     );
 }
 
-function renderRoles(roles: ValidatorRole[], prev_roles: ValidatorRole[], kickoutReason: ValidatorKickoutReason | null = null, isNextEpoch: boolean = false): JSX.Element {
+function renderRoles(roles: ValidatorRole[], prevRoles: ValidatorRole[], kickoutReason: ValidatorKickoutReason | null = null, isNextEpoch: boolean = false): JSX.Element {
     if (isNextEpoch && kickoutReason) {
         return <span className="kickout">✖ <KickoutReason reason={kickoutReason} /></span>;
     }
@@ -525,21 +525,21 @@ function renderRoles(roles: ValidatorRole[], prev_roles: ValidatorRole[], kickou
                 renderedItems.push(<span className="block-producer">BP</span>);
                 break;
             case 'ChunkProducer':
-                const [old_shards, new_shards] =
-                    partition(role.shards, (shard) => prev_roles?.some(prev_role => prev_role.kind === 'ChunkProducer' && prev_role.shards.includes(shard)));
+                const [oldShards, newShards] =
+                    partition(role.shards, (shard) => prevRoles?.some(prevRole => prevRole.kind === 'ChunkProducer' && prevRole.shards.includes(shard)));
                 // Create a list of shard elements with commas between them
                 const shardElements = [
-                    ...old_shards.map(shard => <text className="old-chunk-producer">{shard}</text>),
-                    ...new_shards.map(shard => <text className="new-chunk-producer">{shard}</text>)
+                    ...oldShards.map(shard => <text className="old-chunk-producer">{shard}</text>),
+                    ...newShards.map(shard => <text className="new-chunk-producer">{shard}</text>)
                 ].reduce((acc, element, index) => {
                     if (index === 0) {
                         return [element];
                     }
                     return [...acc, <>,</>, element];
                 }, [] as JSX.Element[]);
-                
+                let className = newShards.length > 0 ? "new-chunk-producer-set" : "chunk-producer-set"
                 renderedItems.push(
-                    <span className="chunk-producer">CP({shardElements})</span>
+                    <span className={className}>CP({shardElements})</span>
                 );
                 break;
             case 'ChunkValidator':
