@@ -13,6 +13,7 @@ import re
 import sys
 import time
 import numpy as np
+from functools import wraps
 
 sys.path.append(str(pathlib.Path(__file__).resolve().parents[2] / 'lib'))
 
@@ -24,6 +25,21 @@ import remote_node
 
 def to_list(item):
     return [item] if item is not None else []
+
+
+def with_schedule_context(func):
+    @wraps(func)
+    def wrapper(args, *func_args, **func_kwargs):
+        # Only build the context if the command is 'schedule'
+        if getattr(args, 'command', None) == 'schedule':
+            context = ScheduleContext(
+                schedule_arg1=args.scheduleArg1,
+                schedule_arg2=args.scheduleArg2,
+            )
+            return func(args, context, *func_args, **func_kwargs)
+        else:
+            return func(args, None, *func_args, **func_kwargs)
+    return wrapper
 
 
 def prompt_setup_flags(args, dumper_node_names):
@@ -548,7 +564,7 @@ class ParseFraction(Action):
         setattr(namespace, self.dest, (numerator, denominator))
 
 
-if __name__ == '__main__':
+def build_parser():
     parser = ArgumentParser(description='Control a mocknet instance')
     parser.add_argument('--mocknet-id',
                         type=str,
@@ -582,6 +598,25 @@ if __name__ == '__main__':
                                        description='valid subcommands',
                                        help='additional help')
 
+    schedule_parser = subparsers.add_parser('schedule', help='Schedule a command to run at a specific block height, timestamp, or in the future.')
+    # Add the command to the schedule based on block height
+    schedule_parser.add_argument('--schedule-at-height',
+                        type=int,
+                        help='Schedule the command to run at the specified block height.')
+
+    # Add nested subparsers under 'schedule'
+    schedule_subparsers = schedule_parser.add_subparsers(title='subcommands',
+                                                         description='valid subcommands',
+                                                         help='additional help',
+                                                         required=True)
+    # register subcommands to schedule_subparsers
+    # TODO: not all commands are supported for scheduling
+    register_subcommands(schedule_subparsers)
+    # register subcommands to subparsers
+    register_subcommands(subparsers)
+    return parser 
+
+def register_subcommands(subparsers):
     init_parser = subparsers.add_parser('init-neard-runner',
                                         help='''
     Sets up the helper servers on each of the nodes. Doesn't start initializing the test
@@ -761,10 +796,13 @@ if __name__ == '__main__':
         'env', help='''Update the environment variable on the hosts.''')
     env_cmd_parser.add_argument('--clear-all', action='store_true')
     env_cmd_parser.add_argument('--key-value', type=str, nargs='+')
-    env_cmd_parser.set_defaults(func=run_env_cmd)
+    env_cmd_parser.set_defaults(func=run_env_cmd)  
 
+if __name__ == '__main__':
+    parser = build_parser()
     args = parser.parse_args()
-
+    print (args)
+    exit()
     if args.local_test:
         if (args.chain_id is not None or args.start_height is not None or
                 args.unique_id is not None or args.mocknet_id is not None):

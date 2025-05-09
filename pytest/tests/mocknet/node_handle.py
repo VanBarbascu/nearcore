@@ -156,13 +156,15 @@ class NodeHandle:
     def neard_runner_update_binaries(self,
                                      neard_binary_url=None,
                                      epoch_height=None,
-                                     binary_idx=None):
+                                     binary_idx=None,
+                                     scheduling_context=None):
         return self.neard_runner_jsonrpc(
             'update_binaries',
             params={
                 'neard_binary_url': neard_binary_url,
                 'epoch_height': epoch_height,
                 'binary_idx': binary_idx,
+                'scheduling_context': scheduling_context,
             })
 
     def neard_update_config(self, key_value):
@@ -183,3 +185,22 @@ class NodeHandle:
 
     def neard_clear_env(self):
         return self.neard_runner_jsonrpc('clear_env')
+
+    def neard_runner_schedule_command(self, block_height, command, description=None):
+        return self.neard_runner_jsonrpc(
+            'schedule_command',
+            params={
+                'block_height': block_height,
+                'command': command,
+                'description': description,
+            })
+
+    def neard_runner_list_scheduled_commands(self):
+        return self.neard_runner_jsonrpc('list_scheduled_commands')
+
+    def neard_runner_cancel_scheduled_command(self, command_id):
+        return self.neard_runner_jsonrpc(
+            'cancel_scheduled_command',
+            params={
+                'command_id': command_id,
+            })

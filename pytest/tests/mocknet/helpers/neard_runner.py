@@ -63,6 +63,11 @@ class JSONHandler(http.server.BaseHTTPRequestHandler):
                                    name="clear_env")
         self.dispatcher.add_method(server.neard_runner.do_add_env,
                                    name="add_env")
+
+        self.dispatcher.add_method(server.neard_runner.do_list_scheduled_commands,
+                                   name="list_scheduled_commands")
+        self.dispatcher.add_method(server.neard_runner.do_cancel_scheduled_command,
+                                   name="cancel_scheduled_command")
         super().__init__(request, client_address, server)
 
     def do_GET(self):
@@ -582,7 +587,7 @@ class NeardRunner:
                         'protocol_version': protocol_version,
                         'genesis_time': genesis_time,
                     }, f)
-
+    @postpone_if_scheduled
     def do_update_config(self, key_value):
         with self.lock:
             logging.info(f'updating config with {key_value}')
@@ -607,6 +612,7 @@ class NeardRunner:
 
         return True
 
+    @postpone_if_scheduled
     def do_start(self, batch_interval_millis=None):
         if batch_interval_millis is not None and not isinstance(
                 batch_interval_millis, int):
@@ -634,6 +640,7 @@ class NeardRunner:
 
     # right now only has an effect if the test setup has been initialized. Should it also mean stop setting up
     # the test if we're in the middle of initializing it?
+    @postpone_if_scheduled
     def do_stop(self):
         with self.lock:
             state = self.get_state()
@@ -734,6 +741,7 @@ class NeardRunner:
                 )
             self.config['binaries'][binary_idx]['url'] = neard_binary_url
 
+    @postpone_if_scheduled
     def do_update_binaries(self, neard_binary_url, epoch_height, binary_idx):
         with self.lock:
             logging.info('update binaries')
@@ -765,12 +773,14 @@ class NeardRunner:
             state = self.get_state()
             return state == TestState.RUNNING or state == TestState.STOPPED
 
+    @postpone_if_scheduled
     def do_clear_env(self):
         with self.lock:
             env_file_path = self.home_path('.env')
             open(env_file_path, 'w').close()
             print(f'File {env_file_path} has been successfully cleared.')
 
+    @postpone_if_scheduled
     def do_add_env(self, key_values):
         with self.lock:
             env_file_path = self.home_path('.env')
@@ -1376,6 +1386,82 @@ class NeardRunner:
         self.set_state(TestState.STOPPED)
         self.save_data()
 
+    # Get the current block height from the node
+    def get_current_block_height(self):
+        try:
+            r = requests.get(f'http://{self.data["neard_addr"]}/status', timeout=5)
+            r.raise_for_status()
+            status = r.json()
+            return int(status['sync_info']['latest_block_height'])
+        except (requests.exceptions.ConnectionError,
+                requests.exceptions.ReadTimeout, KeyError, ValueError) as e:
+            logging.warning(f"Failed to get current block height: {e}")
+            return None
+
+    # Schedule a command to be executed when the block height reaches a specific value
+    def do_schedule_command(self, block_height, command, description=None):
+        if not isinstance(block_height, int) or block_height < 0:
+            raise jsonrpc.exceptions.JSONRPCDispatchException(
+                code=-32600, message='block_height must be a non-negative integer')
+        
+        if not isinstance(command, str) or not command:
+            raise jsonrpc.exceptions.JSONRPCDispatchException(
+                code=-32600, message='command must be a non-empty string')
+
+        current_height = self.get_current_block_height()
+        if current_height is not None and block_height <= current_height:
+            raise jsonrpc.exceptions.JSONRPCDispatchException(
+                code=-32600, message=f'block_height {block_height} is in the past (current height: {current_height})')
+
+        with self.lock:
+            cmd_id = len(self.data['delayed_commands'])
+            cmd_entry = {
+                'id': cmd_id,
+                'block_height': block_height,
+                'command': command,
+                'description': description,
+                'scheduled_at': time.time(),
+                'executed': False
+            }
+            self.data['delayed_commands'].append(cmd_entry)
+            self.save_data()
+            return {'id': cmd_id, 'message': f'Command scheduled for block height {block_height}'}
+
+    # Execute a scheduled command
+    def execute_scheduled_command(self, cmd_entry):
+        cmd = cmd_entry['command']
+        logging.info(f"Executing scheduled command: {cmd}")
+        try:
+            env = self.get_env()
+            process = subprocess.Popen(
+                cmd,
+                shell=True,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=env,
+            )
+            stdout, stderr = process.communicate(timeout=60)  # 60 second timeout
+            exit_code = process.returncode
+            
+            cmd_entry['executed'] = True
+            cmd_entry['executed_at'] = time.time()
+            cmd_entry['exit_code'] = exit_code
+            cmd_entry['stdout'] = stdout.decode('utf-8', errors='replace')
+            cmd_entry['stderr'] = stderr.decode('utf-8', errors='replace')
+            
+            logging.info(f"Command executed with exit code {exit_code}")
+            if exit_code != 0:
+                logging.warning(f"Command failed with stderr: {stderr.decode('utf-8', errors='replace')}")
+            
+            self.save_data()
+        except Exception as e:
+            logging.error(f"Failed to execute command: {e}")
+            cmd_entry['executed'] = True
+            cmd_entry['executed_at'] = time.time()
+            cmd_entry['exit_code'] = -1
+            cmd_entry['error'] = str(e)
+            self.save_data()
     # periodically check if we should update neard after a new epoch
     def main_loop(self):
         while True:
@@ -1409,6 +1495,18 @@ class NeardRunner:
         s = RpcServer(('localhost', port), self)
         s.serve_forever()
 
+
+"""
+schedule actions section
+"""
+def postpone_if_scheduled(func):
+    @wraps(func)
+    def wrapper(neard_runner, schedule_ctx, *args, **kwargs):
+        if schedule_ctx:
+            print(f"Postponed '{func.__name__}' due to schedule context: {schedule_ctx}")
+            return
+        return func(neard_runner, *args, **kwargs)
+    return wrapper
 
 def main():
     parser = argparse.ArgumentParser(description='run neard')
