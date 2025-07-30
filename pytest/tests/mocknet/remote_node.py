@@ -194,7 +194,7 @@ def get_traffic_generator_handle(traffic_generator):
 
 
 def get_nodes(mocknet_id: str):
-    all_nodes = mocknet.get_nodes(pattern=mocknet_id)
+    all_nodes = mocknet.get_nodes(mocknet_id)
     if len(all_nodes) < 1:
         sys.exit(f'no known nodes matching {mocknet_id}')
 

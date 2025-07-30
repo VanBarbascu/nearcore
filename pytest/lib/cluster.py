@@ -19,6 +19,7 @@ import typing
 import uuid
 from rc import gcloud
 from retrying import retry
+from google.cloud.compute_v1.types import Instance
 
 import base58
 
@@ -711,9 +712,10 @@ class LocalNode(BaseNode):
 
 
 class GCloudNode(BaseNode):
-
     def __init__(self, *args, username=None, project=None, ssh_key_path=None):
-        if len(args) == 1:
+        if len(args) == 0:
+            self.machine = None
+        elif len(args) == 1:
             name = args[0]
             # Get existing instance assume it's ready to run.
             self.instance_name = name
@@ -742,7 +744,7 @@ class GCloudNode(BaseNode):
                 min_cpu_platform='Intel Skylake',
                 preemptible=False,
             )
-            # self.ip = self.machine.ip
+            
             self._upload_config_files(node_dir)
             self._download_binary(binary)
             with remote_nodes_lock:
@@ -752,6 +754,19 @@ class GCloudNode(BaseNode):
                     cleanup_remote_nodes_atexit_registered = True
         else:
             raise Exception()
+
+    def from_instance(self, instance: Instance):
+        if self.machine is not None:
+            raise Exception("Already initialized")
+        #self.machine = gcloud.Machine(provider=gcloud_provider, name=instance.name,
+        #                      zone=instance.zone.split('/')[-1], ip=instance.network_interfaces[0].access_configs[0].nat_i_p, username=NODE_USERNAME, ssh_key_path=NODE_SSH_KEY_PATH,
+        #                      project=project)
+        self.instance_name = self.machine.name
+        self.port = 24567
+        self.rpc_port = 3030
+        self.ip = self.machine.ip
+        self.internal_ip = self.machine.internal_ip
+        
 
     def _upload_config_files(self, node_dir):
         self.machine.run('bash', input='mkdir -p ~/.near')
@@ -780,41 +795,10 @@ chmod +x neard
     def rpc_addr(self):
         return (self.ip, self.rpc_port)
 
-    def start(self,
-              *,
-              boot_node: BootNode = None,
-              extra_env: typing.Dict[str, str] = dict()):
-        if "RUST_BACKTRACE" not in extra_env:
-            extra_env["RUST_BACKTRACE"] = "1"
-        extra_env = [f"{k}={v}" for (k, v) in extra_env]
-        extra_env = " ".join(extra_env)
-        self.machine.run_detach_tmux(
-            extra_env +
-            " ".join(self._get_command_line('.', '.near', boot_node)))
-        self.wait_for_rpc(timeout=30)
+    
 
-    def kill(self):
-        self.machine.run('tmux send-keys -t python-rc C-c')
-        time.sleep(3)
-        self.machine.kill_detach_tmux()
+   
 
-    def destroy_machine(self):
-        self.machine.delete()
-
-    def cleanup(self):
-        self.kill()
-        # move the node dir to avoid weird interactions with multiple serial test invocations
-        target_path = self.node_dir + '_finished'
-        if os.path.exists(target_path) and os.path.isdir(target_path):
-            shutil.rmtree(target_path)
-        os.rename(self.node_dir, target_path)
-
-        # Get log and delete machine
-        rc.run(f'mkdir -p /tmp/pytest_remote_log')
-        self.machine.download(
-            '/tmp/python-rc.log',
-            f'/tmp/pytest_remote_log/{self.machine.name}.log')
-        self.destroy_machine()
 
     def json_rpc(self, method, params, timeout=15):
         return super().json_rpc(method, params, timeout=timeout)
@@ -828,21 +812,8 @@ chmod +x neard
         r.raise_for_status()
         return json.loads(r.content)
 
-    def stop_network(self):
-        rc.run(
-            f'gcloud compute firewall-rules create {self.machine.name}-stop --direction=EGRESS --priority=1000 --network=default --action=DENY --rules=all --target-tags={self.machine.name}'
-        )
+    
 
-    def resume_network(self):
-        rc.run(f'gcloud compute firewall-rules delete {self.machine.name}-stop',
-               input='yes\n')
-
-    def reset_validator_key(self, new_key):
-        self.validator_key = new_key
-        with open(os.path.join(self.node_dir, "validator_key.json"), 'w+') as f:
-            json.dump(new_key.to_json(), f)
-        self.machine.upload(os.path.join(self.node_dir, 'validator_key.json'),
-                            f'/home/{self.machine.username}/.near/')
 
 
 def spin_up_node(

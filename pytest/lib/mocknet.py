@@ -10,7 +10,8 @@ import functools
 
 import base58
 import requests
-from rc import run, pmap, gcloud
+from rc import run, pmap
+from google.cloud import compute_v1
 
 import data
 import os
@@ -90,34 +91,87 @@ ACCOUNTS = {
 }
 
 
-def get_node(hostname, project=PROJECT):
-    instance_name = hostname
-    n = GCloudNode(
-        instance_name,
-        username=NODE_USERNAME,
+def get_nodes(mocknet_id, project=PROJECT):
+    # Initialize the Compute Engine client
+    try:
+        client = compute_v1.InstancesClient()
+    except Exception as e:
+        logger.error(f"Failed to initialize Compute Engine client: {e}")
+        logger.error("Please ensure you have proper authentication set up:")
+        logger.error("1. Run 'gcloud auth application-default login' with your personal account")
+        logger.error(f"2. Ensure you have access to the {project} project")
+        logger.error("3. Or set GOOGLE_APPLICATION_CREDENTIALS environment variable for service account")
+        raise
+    
+    # Search for the instance across all zones
+    request = compute_v1.AggregatedListInstancesRequest(
         project=project,
-        ssh_key_path=NODE_SSH_KEY_PATH,
+        filter=f"labels.mocknet_id={mocknet_id}",
+        return_partial_success=False
     )
-    return n
 
-
-def get_nodes(pattern=None, project=PROJECT):
-    machines = gcloud.list(
-        pattern=pattern,
-        project=project,
-        username=NODE_USERNAME,
-        ssh_key_path=NODE_SSH_KEY_PATH,
-    )
-    nodes = pmap(
-        lambda machine: GCloudNode(
-            machine.name,
-            username=NODE_USERNAME,
-            project=project,
-            ssh_key_path=NODE_SSH_KEY_PATH,
-        ),
-        machines,
-    )
-    return nodes
+    try:
+        # Iterate through all pages
+        page_result = client.aggregated_list(request=request)
+        instances = []
+        
+        # Collect all instances from all pages
+        for zone, zone_scoped_list in page_result:
+            if zone_scoped_list.instances:
+                instances.extend(zone_scoped_list.instances)
+        
+        # Convert instances to machine-like objects for compatibility
+        machines = []
+        for instance in instances:
+            print(instance)
+            # Create a machine-like object that mimics the rc.gcloud machine interface
+            machine = type('Machine', (), {
+                'name': instance.name,
+                'ip': instance.network_interfaces[0].access_configs[0].nat_i_p if instance.network_interfaces and instance.network_interfaces[0].access_configs else None,
+                'internal_ip': instance.network_interfaces[0].network_i_p if instance.network_interfaces and instance.network_interfaces[0].network_i_p else None,
+                'username': NODE_USERNAME,
+                'project': project,
+                'labels': dict(instance.labels) if instance.labels else {},
+                'zone': instance.zone.split('/')[-1] if instance.zone else None
+            })()
+            machines.append(machine)
+        
+        print([f"{machine.name} {machine.internal_ip}" for machine in machines])
+        
+        # Create GCloudNode objects for all found instances
+        nodes = pmap(
+            lambda machine: GCloudNode(
+                machine.name,
+                username=NODE_USERNAME,
+                project=project,
+                ssh_key_path=NODE_SSH_KEY_PATH,
+            ),
+            machines,
+        )
+        return nodes
+        
+    except Exception as e:
+        logger.error(f"Failed to get instances with mocknet_id {mocknet_id}: {e}")
+        
+        # Provide specific troubleshooting guidance based on error type
+        if "quota project" in str(e).lower() or "billing project" in str(e).lower():
+            logger.error("Quota project issue detected. Please run:")
+            logger.error(f"gcloud auth application-default set-quota-project {project}")
+            logger.error(f"gcloud config set billing/quota_project {project}")
+        elif "not enabled" in str(e).lower():
+            logger.error("API not enabled. Please enable the Compute Engine API:")
+            logger.error(f"gcloud services enable compute.googleapis.com --project={project}")
+        elif "permission" in str(e).lower() or "access" in str(e).lower():
+            logger.error("Permission issue. Please ensure your account has the required roles:")
+            logger.error("- Compute Instance Admin (v1) or Compute Viewer")
+            logger.error("- Service Usage Consumer")
+        elif "credentials" in str(e).lower():
+            logger.error("Authentication issue. Please check your credentials:")
+            logger.error("1. Run 'gcloud auth application-default login'")
+            logger.error("2. Or set GOOGLE_APPLICATION_CREDENTIALS environment variable")
+            logger.error("3. Or ensure you're running on Google Cloud with metadata server")
+        
+        raise
 
 
 # Needs to be in-sync with init.sh.tmpl in terraform.
