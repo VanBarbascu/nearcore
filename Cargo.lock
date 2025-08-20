@@ -5206,6 +5206,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "near-transfuse"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "borsh",
+ "clap",
+ "near-chain",
+ "near-chain-configs",
+ "near-primitives",
+ "near-store",
+ "nearcore",
+]
+
+[[package]]
 name = "near-undo-block"
 version = "0.0.0"
 dependencies = [
@@ -5534,6 +5548,7 @@ dependencies = [
  "near-state-parts",
  "near-state-parts-dump-check",
  "near-store",
+ "near-transfuse",
  "near-undo-block",
  "nearcore",
  "openssl-probe",

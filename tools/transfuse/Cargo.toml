@@ -1,0 +1,23 @@
+[package]
+name = "near-transfuse"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license.workspace = true
+publish = false
+description = "Transfer block headers and blocks columns between RocksDB instances"
+
+[lints]
+workspace = true
+
+[dependencies]
+clap.workspace = true
+anyhow.workspace = true
+borsh.workspace = true
+near-chain.workspace = true
+near-chain-configs.workspace = true
+near-primitives.workspace = true
+near-store.workspace = true
+nearcore.workspace = true

@@ -53,6 +53,7 @@ near-state-parts.workspace = true
 near-state-parts-dump-check.workspace = true
 near-state-viewer.workspace = true
 near-store.workspace = true
+near-transfuse.workspace = true
 near-undo-block.workspace = true
 near-dump-test-contract.workspace = true
 

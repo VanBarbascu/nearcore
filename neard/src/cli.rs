@@ -30,6 +30,7 @@ use near_state_viewer::StateViewerSubCommand;
 use near_store::db::RocksDB;
 use near_store::{Mode, ShardUId};
 use near_undo_block::cli::UndoBlockCommand;
+use near_transfuse::TransfuseArgs;
 use serde_json::Value;
 use std::fs::File;
 use std::io::BufReader;
@@ -156,6 +157,9 @@ impl NeardCmd {
             NeardSubCommand::DumpEpochConfigs(cmd) => {
                 cmd.run(&home_dir)?;
             }
+            NeardSubCommand::Transfuse(cmd) => {
+                cmd.run()?;
+            }
         };
         Ok(())
     }
@@ -268,6 +272,9 @@ pub(super) enum NeardSubCommand {
 
     /// Dump hard-coded epoch configs into JSON files
     DumpEpochConfigs(DumpEpochConfigsCommand),
+
+    /// Transfer block headers and blocks columns between RocksDB instances
+    Transfuse(TransfuseCommand),
 }
 
 #[allow(unused)]
@@ -873,6 +880,18 @@ impl ValidateConfigCommand {
     ) -> anyhow::Result<()> {
         nearcore::config::load_config(home_dir, genesis_validation)?;
         Ok(())
+    }
+}
+
+#[derive(clap::Parser)]
+pub(super) struct TransfuseCommand {
+    #[clap(flatten)]
+    args: TransfuseArgs,
+}
+
+impl TransfuseCommand {
+    pub(super) fn run(&self) -> anyhow::Result<()> {
+        near_transfuse::run_transfuse(&self.args)
     }
 }
 
