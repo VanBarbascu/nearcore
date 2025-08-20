@@ -194,7 +194,7 @@ fn transfer_column(
             let height_key = height_to_key(current_height);
             
             if let Some(value) = source_store.get(column, &height_key)? {
-                store_update.set(column, &height_key, value.as_ref());
+                store_update.insert(column, height_key.clone(), value.to_vec());
                 stats.add_key(height_key.len(), value.len());
                 batch_count += 1;
 
@@ -223,7 +223,7 @@ fn transfer_column(
             if let Some(block_hash_bytes) = source_store.get(DBCol::BlockHeight, &height_key)? {
                 // Get the actual block/header data
                 if let Some(data) = source_store.get(column, &block_hash_bytes)? {
-                    store_update.set(column, block_hash_bytes.as_ref(), data.as_ref());
+                    store_update.insert(column, block_hash_bytes.to_vec(), data.to_vec());
                     stats.add_key(block_hash_bytes.len(), data.len());
                     batch_count += 1;
 
