@@ -4,6 +4,7 @@ use near_store::{DBCol, Mode, NodeStorage, Store};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
+use rayon::prelude::*;
 
 #[derive(Parser)]
 #[command(name = "transfuse")]
@@ -46,6 +47,10 @@ pub struct TransfuseArgs {
     /// Skip existing blocks in destination
     #[arg(long)]
     pub skip_existing: bool,
+
+    /// Number of threads to use for parallel processing
+    #[arg(long, default_value_t = num_cpus::get())]
+    pub threads: usize,
 }
 
 #[derive(ValueEnum, Clone)]
@@ -169,6 +174,101 @@ fn key_to_height(key: &[u8]) -> Option<u64> {
     }
 }
 
+fn transfer_column_parallel(
+    args: &TransfuseArgs,
+    source_store: &Store,
+    dest_store: &Store,
+    column: DBCol,
+    start_height: u64,
+    end_height: Option<u64>,
+) -> anyhow::Result<TransferStats> {
+    println!("Transferring column '{:?}' from height {} to {:?} using {} threads", 
+             column, start_height, end_height, args.threads);
+
+    let mut stats = TransferStats::new();
+    stats.set_height_range(start_height, end_height);
+    
+    let actual_end_height = end_height.unwrap_or(u64::MAX);
+    let total_heights = actual_end_height.saturating_sub(start_height) + 1;
+    
+    // Create height ranges for each thread
+    let heights_per_thread = (total_heights + args.threads as u64 - 1) / args.threads as u64;
+    let height_ranges: Vec<(u64, u64)> = (0..args.threads)
+        .map(|i| {
+            let thread_start = start_height + (i as u64 * heights_per_thread);
+            let thread_end = if i == args.threads - 1 {
+                actual_end_height
+            } else {
+                (thread_start + heights_per_thread).min(actual_end_height)
+            };
+            (thread_start, thread_end)
+        })
+        .filter(|(start, end)| start <= end)
+        .collect();
+
+    // Process each range in parallel
+    let results: Vec<anyhow::Result<Vec<(Vec<u8>, Vec<u8>)>>> = height_ranges
+        .into_par_iter()
+        .map(|(thread_start, thread_end)| {
+            let mut thread_data = Vec::new();
+            
+            if matches!(column, DBCol::BlockHeight) {
+                // For height-based columns
+                for current_height in thread_start..=thread_end {
+                    let height_key = height_to_key(current_height);
+                    if let Some(value) = source_store.get(column, &height_key)? {
+                        thread_data.push((height_key, value.to_vec()));
+                    }
+                }
+            } else {
+                // For other columns, find blocks by height first
+                for current_height in thread_start..=thread_end {
+                    let height_key = height_to_key(current_height);
+                    if let Some(block_hash_bytes) = source_store.get(DBCol::BlockHeight, &height_key)? {
+                        if let Some(data) = source_store.get(column, &block_hash_bytes)? {
+                            thread_data.push((block_hash_bytes.to_vec(), data.to_vec()));
+                        }
+                    }
+                }
+            }
+            
+            Ok(thread_data)
+        })
+        .collect();
+
+    // Combine results and write to destination
+    let mut batch_count = 0;
+    let mut store_update = dest_store.store_update();
+    
+    for result in results {
+        let thread_data = result?;
+        for (key, value) in thread_data {
+            let value_len = value.len();
+            store_update.insert(column, key.clone(), value);
+            stats.add_key(key.len(), value_len);
+            batch_count += 1;
+
+            // Write batch when it reaches the specified size
+            if batch_count >= args.batch_size {
+                store_update.commit()?;
+                store_update = dest_store.store_update();
+                batch_count = 0;
+
+                if args.progress {
+                    stats.print_progress(None);
+                }
+            }
+        }
+    }
+
+    // Write remaining items in batch
+    if batch_count > 0 {
+        store_update.commit()?;
+    }
+
+    Ok(stats)
+}
+
 fn transfer_column(
     args: &TransfuseArgs,
     source_store: &Store,
@@ -177,54 +277,29 @@ fn transfer_column(
     start_height: u64,
     end_height: Option<u64>,
 ) -> anyhow::Result<TransferStats> {
-    println!("Transferring column '{:?}' from height {} to {:?}", column, start_height, end_height);
-
-    let mut stats = TransferStats::new();
-    stats.set_height_range(start_height, end_height);
-    
-    let mut batch_count = 0;
-    let mut store_update = dest_store.store_update();
-
-    // For height-based columns, we need to iterate based on height
-    if matches!(column, DBCol::BlockHeight) {
-        let actual_end_height = end_height.unwrap_or(u64::MAX);
-        let mut current_height = start_height;
-        
-        while current_height <= actual_end_height {
-            let height_key = height_to_key(current_height);
-            
-            if let Some(value) = source_store.get(column, &height_key)? {
-                store_update.insert(column, height_key.clone(), value.to_vec());
-                stats.add_key(height_key.len(), value.len());
-                batch_count += 1;
-
-                // Write batch when it reaches the specified size
-                if batch_count >= args.batch_size {
-                    store_update.commit()?;
-                    store_update = dest_store.store_update();
-                    batch_count = 0;
-
-                    if args.progress {
-                        stats.print_progress(Some(current_height));
-                    }
-                }
-            }
-            current_height += 1;
-        }
+    if args.threads > 1 {
+        transfer_column_parallel(args, source_store, dest_store, column, start_height, end_height)
     } else {
-        // For other columns, we'll need to find blocks by height first, then get them by hash
-        let actual_end_height = end_height.unwrap_or(u64::MAX);
-        let mut current_height = start_height;
+        // Original single-threaded implementation
+        println!("Transferring column '{:?}' from height {} to {:?}", column, start_height, end_height);
+
+        let mut stats = TransferStats::new();
+        stats.set_height_range(start_height, end_height);
         
-        while current_height <= actual_end_height {
-            let height_key = height_to_key(current_height);
+        let mut batch_count = 0;
+        let mut store_update = dest_store.store_update();
+
+        // For height-based columns, we need to iterate based on height
+        if matches!(column, DBCol::BlockHeight) {
+            let actual_end_height = end_height.unwrap_or(u64::MAX);
+            let mut current_height = start_height;
             
-            // Get block hash from height
-            if let Some(block_hash_bytes) = source_store.get(DBCol::BlockHeight, &height_key)? {
-                // Get the actual block/header data
-                if let Some(data) = source_store.get(column, &block_hash_bytes)? {
-                    store_update.insert(column, block_hash_bytes.to_vec(), data.to_vec());
-                    stats.add_key(block_hash_bytes.len(), data.len());
+            while current_height <= actual_end_height {
+                let height_key = height_to_key(current_height);
+                
+                if let Some(value) = source_store.get(column, &height_key)? {
+                    store_update.insert(column, height_key.clone(), value.to_vec());
+                    stats.add_key(height_key.len(), value.len());
                     batch_count += 1;
 
                     // Write batch when it reaches the specified size
@@ -238,17 +313,47 @@ fn transfer_column(
                         }
                     }
                 }
+                current_height += 1;
             }
-            current_height += 1;
+        } else {
+            // For other columns, we'll need to find blocks by height first, then get them by hash
+            let actual_end_height = end_height.unwrap_or(u64::MAX);
+            let mut current_height = start_height;
+            
+            while current_height <= actual_end_height {
+                let height_key = height_to_key(current_height);
+                
+                // Get block hash from height
+                if let Some(block_hash_bytes) = source_store.get(DBCol::BlockHeight, &height_key)? {
+                    // Get the actual block/header data
+                    if let Some(data) = source_store.get(column, &block_hash_bytes)? {
+                        store_update.insert(column, block_hash_bytes.to_vec(), data.to_vec());
+                        stats.add_key(block_hash_bytes.len(), data.len());
+                        batch_count += 1;
+
+                        // Write batch when it reaches the specified size
+                        if batch_count >= args.batch_size {
+                            store_update.commit()?;
+                            store_update = dest_store.store_update();
+                            batch_count = 0;
+
+                            if args.progress {
+                                stats.print_progress(Some(current_height));
+                            }
+                        }
+                    }
+                }
+                current_height += 1;
+            }
         }
-    }
 
-    // Write remaining items in batch
-    if batch_count > 0 {
-        store_update.commit()?;
-    }
+        // Write remaining items in batch
+        if batch_count > 0 {
+            store_update.commit()?;
+        }
 
-    Ok(stats)
+        Ok(stats)
+    }
 }
 
 fn verify_transfer(

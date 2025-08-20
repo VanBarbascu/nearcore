@@ -5,6 +5,7 @@ use std::path::Path;
 #[derive(clap::Subcommand)]
 enum BlockMiscKeySelector {
     StateSnapshot,
+    HeaderHead
 }
 
 #[derive(clap::Subcommand)]
@@ -46,6 +47,13 @@ impl WriteCryptoHashCommand {
                     store_update.set_ser(
                         DBCol::BlockMisc,
                         near_store::STATE_SNAPSHOT_KEY,
+                        &self.hash,
+                    )?;
+                }
+                BlockMiscKeySelector::HeaderHead => {
+                    store_update.set_ser(
+                        DBCol::BlockMisc,
+                        near_store::HEADER_HEAD_KEY,
                         &self.hash,
                     )?;
                 }

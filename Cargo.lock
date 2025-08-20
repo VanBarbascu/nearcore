@@ -5217,6 +5217,8 @@ dependencies = [
  "near-primitives",
  "near-store",
  "nearcore",
+ "num_cpus",
+ "rayon",
 ]
 
 [[package]]

@@ -21,3 +21,5 @@ near-chain-configs.workspace = true
 near-primitives.workspace = true
 near-store.workspace = true
 nearcore.workspace = true
+rayon.workspace = true
+num_cpus = "1.0"
