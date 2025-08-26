@@ -10,6 +10,7 @@ import random
 import shutil
 from rc import pmap
 import re
+import requests
 import sys
 import time
 import numpy as np
@@ -312,20 +313,107 @@ def stop_runner_cmd(ctx: CommandContext):
     pmap(lambda node: node.stop_neard_runner(), targeted)
 
 
+### Stake distribution ###
+
+
+class StakeDistribution:
+
+    def __init__(self, num_chunk_producers):
+        self.num_chunk_producers = num_chunk_producers
+        self.producer_idx = 0
+
+    def get_next_validator_stake(self):
+        pass
+
+    def get_next_producer_stake(self):
+        pass
+
+    def get_stake(self, node):
+        if node.role(
+        ) == 'validator' or self.producer_idx >= self.num_chunk_producers:
+            amount = self.get_next_validator_stake()
+        else:
+            amount = self.get_next_producer_stake()
+        return amount
+
+
+class MainnetStakeDistribution(StakeDistribution):
+    """
+    Uses the mainnet validator stakes as the stake distribution.
+    To avoid going below the seat price, the stake of the bottom `double_after` validators is doubled.
+    If more validators are requested than available, the stake of the last validator is used for the remaining validators.
+    To avoid mainnet stake leaking to the mocknet, the stake is amplified by `multiplier`.
+    """
+
+    @staticmethod
+    def get_mainnet_stakes():
+        """
+        Makes an RPC call to mainnet to get current validator stakes
+        """
+        url = "https://rpc.mainnet.near.org"
+        payload = {
+            "jsonrpc": "2.0",
+            "id": "dontcare",
+            "method": "validators",
+            "params": [None]
+        }
+        response = requests.post(url, json=payload)
+        if response.status_code == 200:
+            data = response.json()
+            return [
+                int(v['stake']) for v in data['result']['current_validators']
+            ]
+        else:
+            raise Exception(
+                f"Failed to get mainnet stakes: {response.status_code}")
+
+    def __init__(self, num_chunk_producers):
+        super().__init__(num_chunk_producers)
+        self.mainnet_stakes = MainnetStakeDistribution.get_mainnet_stakes()
+        self.num_validators = len(self.mainnet_stakes)
+        self.validator_idx = self.num_chunk_producers
+        self.double_after = 100
+        self.multiplier = 100000
+
+    def get_next_validator_stake(self):
+        if self.validator_idx >= self.num_validators:
+            stake = self.mainnet_stakes[-1]
+        else:
+            stake = self.mainnet_stakes[self.validator_idx]
+            self.validator_idx += 1
+        if self.validator_idx >= self.num_validators - self.double_after:
+            stake = stake * 2
+        return stake * self.multiplier
+
+    def get_next_producer_stake(self):
+        stake = self.mainnet_stakes[self.producer_idx]
+        self.producer_idx += 1
+        return stake * self.multiplier
+
+
+class StaticStakeDistribution(StakeDistribution):
+
+    def get_next_validator_stake(self):
+        return 10**32
+
+    def get_next_producer_stake(self):
+        self.producer_idx += 1
+        return 10**33
+
+
 # returns boot nodes and validators we want for the new test network
-def get_network_nodes(new_test_rpc_responses, num_validators):
+def get_network_nodes(new_test_rpc_responses, num_validators,
+                      stake_distribution):
     validators = []
     non_validators = []
     boot_nodes = []
+    producers_added = 0
     for node, response in new_test_rpc_responses:
         if len(validators) < num_validators:
             if node.can_validate:
                 # We assume that if node validates a chain, it has account id
                 # and public key.
-                if node.role() == 'validator':
-                    amount = 10**32
-                else:
-                    amount = 10**33
+                amount = stake_distribution.get_stake(node)
 
                 validators.append({
                     'account_id': response['validator_account_id'],
@@ -353,6 +441,8 @@ def get_network_nodes(new_test_rpc_responses, num_validators):
         logger.warning(
             f'wanted {num_validators} validators, but only {len(validators)} available'
         )
+    # Sort validators by decreasing amount (number) and then by increasing validator account id
+    validators.sort(key=lambda v: (-int(v['amount']), v['account_id']))
     return validators, boot_nodes
 
 
@@ -424,8 +514,15 @@ def new_test_cmd(ctx: CommandContext):
     test_keys = pmap(
         lambda node: node.neard_runner_new_test(ctx.get_mocknet_id()), targeted)
 
+    if getattr(args, 'stake_distribution', None) == 'mainnet':
+        stake_distribution = MainnetStakeDistribution(args.num_seats)
+        logger.info(f'Using mainnet stake distribution')
+    else:
+        stake_distribution = StaticStakeDistribution(args.num_seats)
+        logger.info(f'Using static stake distribution')
     validators, boot_nodes = get_network_nodes(zip(nodes, test_keys),
-                                               args.num_validators)
+                                               args.num_validators,
+                                               stake_distribution)
     logger.info("""Setting validators: {0}
 Run `status` to check if the nodes are ready. After they're ready,
  you can run `start-nodes` and `start-traffic`""".format(validators))
@@ -886,6 +983,13 @@ def register_base_commands(subparsers):
         """Enable state dumper nodes to sync state to GCS. On localnet, it will dump locally."""
     )
     new_test_parser.add_argument('--yes', action='store_true')
+    new_test_parser.add_argument('--stake-distribution',
+                                 type=str,
+                                 default='static',
+                                 choices=['static', 'mainnet'],
+                                 help='''
+                                 Stake distribution to use for the mocknet.
+                                 ''')
     new_test_parser.set_defaults(func=new_test_cmd)
 
     status_parser = subparsers.add_parser(
