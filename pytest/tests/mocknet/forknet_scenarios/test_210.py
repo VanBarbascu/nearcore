@@ -10,7 +10,7 @@ from utils import ScheduleMode
 class TestOnly210(TestSetup):
     """
     Test case:
-    - only 2.9.0 from the top of the forknet. no upgrade.
+    - only 2.10.0 from the top of the forknet. no upgrade.
     - shard shuffle for chunk producers
     """
 
@@ -33,10 +33,10 @@ class TestOnly210(TestSetup):
             ".shuffle_shard_assignment_for_chunk_producers = true")
 
 
-class Test290(TestSetup):
+class Test210(TestSetup):
     """
     Test case:
-    - upgrade from 2.8.0 to 2.9.0
+    - upgrade from 2.9.0 to 2.10.0
     """
 
     def __init__(self, args):
@@ -47,14 +47,14 @@ class Test290(TestSetup):
             num_chunk_producer_seats=19, num_chunk_validator_seats=24)
         self.epoch_len = 1200  # 1200/1.7/60 = ~11.5min
         self.has_state_dumper = False
-        self.genesis_protocol_version = 80
+        self.genesis_protocol_version = 81
         self.has_archival = True
         self.regions = "us-east1,europe-west4,asia-east1,us-west1"
         self.upgrade_interval_minutes = 5  # 5 min; within the first 2 epochs
-        self.neard_binary_url = 'https://s3-us-west-1.amazonaws.com/build.nearprotocol.com/nearcore/Linux-x86_64/2.8.0/neard'
+        self.neard_binary_url = 'https://s3-us-west-1.amazonaws.com/build.nearprotocol.com/nearcore/Linux-x86_64/2.9.0/neard'
         # this branch is to iterate faster than the main release branch.
         # keep it in sync with the main release branch.
-        self.neard_upgrade_binary_url = 'https://s3-us-west-1.amazonaws.com/build.nearprotocol.com/nearcore/Linux-x86_64/2.9.0_forknet/neard'
+        self.neard_upgrade_binary_url = 'https://s3-us-west-1.amazonaws.com/build.nearprotocol.com/nearcore/Linux-x86_64/2.10.0/neard'
 
     def amend_configs_before_test_start(self):
         super().amend_configs_before_test_start()
@@ -69,7 +69,7 @@ class Test290(TestSetup):
             self.upgrade_interval_minutes)
 
 
-class Test290Long(Test290):
+class Test210Long(Test210):
     """
     Long running test case:
     Long epoch length, to check state sync before and after the upgrade.
@@ -99,7 +99,7 @@ class Test290Long(Test290):
         run_remote_cmd(CommandContext(run_cmd_args))
 
 
-class Test290Small(Test290):
+class Test210Small(Test210):
     """
     Smaller example test case:
     Short epoch length, long blocks.
