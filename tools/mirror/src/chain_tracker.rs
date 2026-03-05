@@ -1,6 +1,7 @@
 use crate::{
-    ChainAccess, ChainError, LatestTargetNonce, MappedBlock, MappedTx, MappedTxProvenance,
-    NonceKind, NonceLookupKey, NonceUpdater, TargetChainTx, TargetNonce, TxBatch, TxRef,
+    ChainAccess, ChainError, LatestTargetNonce, MappedBlock, MappedChunk, MappedTx,
+    MappedTxProvenance, NonceKind, NonceLookupKey, NonceUpdater, TargetChainTx, TargetNonce,
+    TxBatch, TxRef,
 };
 use anyhow::Context;
 use near_async::multithread::MultithreadRuntimeHandle;
@@ -12,7 +13,7 @@ use near_primitives::hash::CryptoHash;
 use near_primitives::transaction::Transaction;
 use near_primitives::types::{AccountId, Balance, BlockHeight};
 use near_primitives::views::{ActionView, ExecutionStatusView, ReceiptEnumView};
-use near_primitives_core::types::{Nonce, NonceIndex};
+use near_primitives_core::types::{Nonce, NonceIndex, ShardId};
 use parking_lot::Mutex;
 use rocksdb::DB;
 use std::cmp::Ordering;
@@ -152,6 +153,8 @@ pub(crate) struct TxTracker {
     recent_block_timestamps: VecDeque<u64>,
     // last source block we'll be sending transactions for
     stop_height: Option<BlockHeight>,
+    // tracks how many times each source_height has been re-queued
+    requeue_attempts: HashMap<BlockHeight, usize>,
 }
 
 impl TxTracker {
@@ -182,6 +185,7 @@ impl TxTracker {
             height_popped: None,
             height_seen: None,
             recent_block_timestamps: VecDeque::new(),
+            requeue_attempts: HashMap::new(),
         }
     }
 
@@ -686,7 +690,7 @@ impl TxTracker {
         tx_block_queue: &Mutex<VecDeque<MappedBlock>>,
         db: &DB,
         updated_key: UpdatedKey,
-        mut nonce: Option<Nonce>,
+        nonce: Option<Nonce>,
     ) -> anyhow::Result<()> {
         let mut n = crate::read_target_nonce(db, &updated_key.nonce_key)?.unwrap();
         n.pending_outcomes.remove(&updated_key.id);
@@ -699,9 +703,15 @@ impl TxTracker {
 
         if let Some(info) = self.nonces.get_mut(&nonce_key) {
             info.target_nonce.pending_outcomes.remove(&updater);
+            info.target_nonce.nonce = std::cmp::max(info.target_nonce.nonce, nonce);
             let txs_awaiting_nonce = info.txs_awaiting_nonce.clone();
             let mut to_remove = Vec::new();
 
+            // Don't convert AwaitingNonce→Ready here. Re-queued blocks are
+            // sent after all new blocks, so nonces assigned now would be
+            // stale by send time. Just update pending_outcomes and nonce
+            // info on each tx. resolve_block_nonces() assigns fresh nonces
+            // just before sending.
             if !txs_awaiting_nonce.is_empty() {
                 let mut tx_block_queue = tx_block_queue.lock();
                 for r in &txs_awaiting_nonce {
@@ -710,26 +720,12 @@ impl TxTracker {
                     match tx {
                         TargetChainTx::AwaitingNonce(t) => {
                             t.target_nonce.pending_outcomes.remove(&updater);
-                            if let Some(nonce) = &mut nonce {
-                                *nonce += 1;
-                            }
-
-                            if t.target_nonce.pending_outcomes.is_empty() {
-                                to_remove.push(r.clone());
-                                tx.try_set_nonce(nonce);
-                                match tx {
-                                    TargetChainTx::Ready(t) => {
-                                        tracing::debug!(target: "mirror", ?nonce_key, tx_ref = %r, nonce = %t.target_tx.transaction.nonce().nonce(), "set nonce for key");
-                                    }
-                                    _ => {
-                                        tracing::warn!(target: "mirror", ?nonce_key, tx_ref = %r, "couldn't set nonce for key");
-                                    }
-                                }
-                            } else {
-                                t.target_nonce.nonce = std::cmp::max(t.target_nonce.nonce, nonce);
-                            }
+                            t.target_nonce.nonce = std::cmp::max(t.target_nonce.nonce, nonce);
                         }
-                        TargetChainTx::Ready(_) => unreachable!(),
+                        TargetChainTx::Ready(_) => {
+                            // resolve_block_nonces may have already converted this tx.
+                            to_remove.push(r.clone());
+                        }
                     };
                 }
             }
@@ -738,7 +734,6 @@ impl TxTracker {
             for r in &to_remove {
                 info.txs_awaiting_nonce.remove(r);
             }
-            info.target_nonce.nonce = std::cmp::max(info.target_nonce.nonce, nonce);
         }
         Ok(())
     }
@@ -1062,20 +1057,12 @@ impl TxTracker {
                             match target_tx {
                                 TargetChainTx::AwaitingNonce(tx) => {
                                     assert!(tx.target_nonce.pending_outcomes.remove(&updater));
-                                    if tx.target_nonce.pending_outcomes.is_empty() {
-                                        target_tx.try_set_nonce(None);
-                                        match target_tx {
-                                            TargetChainTx::Ready(t) => {
-                                                tracing::debug!(target: "mirror", %tx_ref, ?nonce_key, tx_awaiting_nonce = %r, nonce = %t.target_tx.transaction.nonce().nonce(), "after skipping setting nonce for key");
-                                            }
-                                            _ => {
-                                                tracing::warn!(target: "mirror", %tx_ref, ?nonce_key, tx_awaiting_nonce = %r, "after skipping could not set nonce for key");
-                                            }
-                                        }
-                                        to_remove.push(r.clone());
-                                    }
+                                    // Don't resolve here; resolve_block_nonces
+                                    // handles it at send time.
                                 }
-                                TargetChainTx::Ready(_) => unreachable!(),
+                                TargetChainTx::Ready(_) => {
+                                    to_remove.push(r.clone());
+                                }
                             }
                         }
                     }
@@ -1101,41 +1088,194 @@ impl TxTracker {
     }
 
     // We just successfully sent some transactions. Remember them so we can see if they really show up on chain.
-    // Returns the new amount that we should wait before sending transactions
+    // Returns (next_send_delay, nonce_keys_needing_resolution).
+    // The caller should fetch nonces for the returned keys from the target chain
+    // and call force_resolve_nonces() for each one that is available.
     pub(crate) fn on_txs_sent(
         &mut self,
         tx_block_queue: &Mutex<VecDeque<MappedBlock>>,
         db: &DB,
         sent_batch: SentBatch,
         target_height: BlockHeight,
-    ) -> anyhow::Result<Duration> {
+    ) -> anyhow::Result<(Duration, Vec<NonceLookupKey>)> {
         let mut total_sent = 0;
         let now = Instant::now();
         let mut keys_to_remove = HashSet::new();
+        let mut nonce_keys_to_resolve = Vec::new();
 
-        let (txs_sent, provenance) = match sent_batch {
+        let (txs_sent, deferred_updater_inserts, provenance, was_requeued) = match sent_batch {
             SentBatch::MappedBlock(b) => {
-                self.height_popped = Some(b.source_height);
-                for (tx_ref, tx) in &b.txs {
+                let source_height = b.source_height;
+                let source_hash = b.source_hash;
+
+                // Split txs into ready (sent or skipped) and still awaiting nonce.
+                let mut requeue = Vec::new();
+                let mut ready_txs = Vec::new();
+                for (tx_ref, tx) in b.txs {
                     match tx {
-                        TargetChainTx::AwaitingNonce(t) => {
-                            let nonce_key = NonceLookupKey::from_tx(&t.target_tx);
-                            self.nonces
-                                .get_mut(&nonce_key)
-                                .unwrap()
-                                .txs_awaiting_nonce
-                                .remove(&tx_ref);
-                        }
-                        TargetChainTx::Ready(_) => {}
-                    };
+                        TargetChainTx::AwaitingNonce(_) => requeue.push((tx_ref, tx)),
+                        TargetChainTx::Ready(_) => ready_txs.push((Some(tx_ref), tx)),
+                    }
                 }
-                let txs =
-                    b.txs.into_iter().map(|(tx_ref, tx)| (Some(tx_ref), tx)).collect::<Vec<_>>();
-                (txs, format!("source #{}", b.source_height))
+
+                // Re-queue AwaitingNonce txs. The new block is pushed to the
+                // front of the queue so that on_tx_sent (below) can find
+                // the awaiting-nonce txs via get_tx when updating their
+                // pending_outcomes.
+                //
+                // We must be careful: the re-queued txs get new TxRef values
+                // (tx_idx renumbered from 0) that may collide with ready txs'
+                // original TxRefs in updater_to_keys. We defer such inserts
+                // and apply them after the ready txs have been processed.
+                let mut deferred_updater_inserts = Vec::new();
+                let ready_refs: HashSet<TxRef> =
+                    ready_txs.iter().filter_map(|(ref_opt, _)| ref_opt.clone()).collect();
+
+                // Drop AwaitingNonce txs that have exceeded the max re-queue attempts.
+                const MAX_REQUEUE_ATTEMPTS: usize = 5;
+                let attempt = self.requeue_attempts.entry(source_height).or_insert(0);
+                *attempt += 1;
+
+                if !requeue.is_empty() && *attempt > MAX_REQUEUE_ATTEMPTS {
+                    tracing::warn!(
+                        target: "mirror",
+                        count = requeue.len(),
+                        source_height,
+                        attempts = *attempt,
+                        "dropping awaiting-nonce txs after max re-queue attempts",
+                    );
+                    // Move to ready_txs so they go through on_tx_skipped.
+                    for (tx_ref, tx) in requeue {
+                        ready_txs.push((Some(tx_ref), tx));
+                    }
+                    requeue = Vec::new();
+                    self.requeue_attempts.remove(&source_height);
+                }
+
+                if !requeue.is_empty() {
+                    crate::metrics::TRANSACTIONS_REQUEUED.inc_by(requeue.len() as u64);
+                    tracing::info!(
+                        target: "mirror",
+                        count = requeue.len(),
+                        source_height,
+                        "re-queuing transactions still awaiting nonce",
+                    );
+
+                    // Build chunks grouped by shard_id, assigning new tx indices.
+                    let mut chunks_map: HashMap<ShardId, Vec<TargetChainTx>> = HashMap::new();
+                    let mut ref_updates = Vec::new(); // (old_ref, new_ref)
+
+                    for (old_ref, tx) in requeue {
+                        let shard_id = old_ref.shard_id;
+                        let chunk_txs = chunks_map.entry(shard_id).or_insert_with(Vec::new);
+                        let new_ref = TxRef { source_height, shard_id, tx_idx: chunk_txs.len() };
+                        // Collect nonce keys so the caller can actively fetch nonces.
+                        if let TargetChainTx::AwaitingNonce(ref t) = tx {
+                            nonce_keys_to_resolve.push(NonceLookupKey::from_tx(&t.target_tx));
+                        }
+                        chunk_txs.push(tx);
+                        ref_updates.push((old_ref, new_ref));
+                    }
+
+                    let chunks: Vec<MappedChunk> = chunks_map
+                        .into_iter()
+                        .map(|(shard_id, txs)| MappedChunk { shard_id, txs })
+                        .collect();
+
+                    let new_block = MappedBlock { source_height, source_hash, chunks };
+
+                    // Update all tracking structures for the ref changes.
+                    for (old_ref, new_ref) in &ref_updates {
+                        // Find the nonce key for this tx.
+                        let nonce_key = {
+                            let chunk = new_block
+                                .chunks
+                                .iter()
+                                .find(|c| c.shard_id == new_ref.shard_id)
+                                .unwrap();
+                            match &chunk.txs[new_ref.tx_idx] {
+                                TargetChainTx::AwaitingNonce(t) => {
+                                    NonceLookupKey::from_tx(&t.target_tx)
+                                }
+                                TargetChainTx::Ready(_) => unreachable!(),
+                            }
+                        };
+
+                        // Update txs_awaiting_nonce and queued_txs.
+                        if let Some(info) = self.nonces.get_mut(&nonce_key) {
+                            info.txs_awaiting_nonce.remove(old_ref);
+                            info.txs_awaiting_nonce.insert(new_ref.clone());
+                            info.queued_txs.remove(old_ref);
+                            info.queued_txs.insert(new_ref.clone());
+                        }
+
+                        // Update updater_to_keys.
+                        let old_updater = NonceUpdater::TxRef(old_ref.clone());
+                        let new_updater = NonceUpdater::TxRef(new_ref.clone());
+                        if let Some(keys) = self.updater_to_keys.remove(&old_updater) {
+                            for key in &keys {
+                                if let Some(info) = self.nonces.get_mut(key) {
+                                    if info.target_nonce.pending_outcomes.remove(&old_updater) {
+                                        info.target_nonce
+                                            .pending_outcomes
+                                            .insert(new_updater.clone());
+                                    }
+                                }
+                            }
+                            // If the new ref collides with a ready tx's TxRef,
+                            // defer the insert until after ready txs are processed.
+                            if ready_refs.contains(&new_ref)
+                                || self.updater_to_keys.contains_key(&new_updater)
+                            {
+                                deferred_updater_inserts.push((new_updater.clone(), keys));
+                            } else {
+                                self.updater_to_keys.insert(new_updater.clone(), keys);
+                            }
+                        }
+                    }
+
+                    {
+                        let mut q = tx_block_queue.lock();
+                        let pos = q
+                            .binary_search_by(|b| b.source_height.cmp(&source_height))
+                            .expect_err("block at this height was just removed");
+                        q.insert(pos, new_block);
+                    }
+
+                    // Update pending_outcomes inside the re-queued txs themselves.
+                    {
+                        let mut tx_block_queue = tx_block_queue.lock();
+                        for (old_ref, new_ref) in &ref_updates {
+                            let old_updater = NonceUpdater::TxRef(old_ref.clone());
+                            let new_updater = NonceUpdater::TxRef(new_ref.clone());
+                            let tx = Self::get_tx(&mut tx_block_queue, new_ref);
+                            if let TargetChainTx::AwaitingNonce(t) = tx {
+                                if t.target_nonce.pending_outcomes.remove(&old_updater) {
+                                    t.target_nonce.pending_outcomes.insert(new_updater);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                self.height_popped = match self.height_popped {
+                    Some(h) => Some(std::cmp::max(h, source_height)),
+                    None => Some(source_height),
+                };
+
+                let was_requeued = self.requeue_attempts.contains_key(&source_height);
+                (
+                    ready_txs,
+                    deferred_updater_inserts,
+                    format!("source #{}", source_height),
+                    was_requeued,
+                )
             }
             SentBatch::ExtraTxs(txs) => (
                 txs.into_iter().map(|tx| (None, tx)).collect::<Vec<_>>(),
+                Vec::new(),
                 String::from("extra unstake transactions"),
+                false,
             ),
         };
         for (tx_ref, tx) in txs_sent {
@@ -1174,6 +1314,11 @@ impl TxTracker {
             }
         }
 
+        // Apply deferred updater inserts now that ready txs are processed.
+        for (updater, keys) in deferred_updater_inserts {
+            self.updater_to_keys.insert(updater, keys);
+        }
+
         for nonce_key in keys_to_remove {
             assert!(self.nonces.remove(&nonce_key).is_some());
         }
@@ -1185,10 +1330,119 @@ impl TxTracker {
             "sent txs",
         );
 
-        let next_delay = self.tx_batch_interval.unwrap_or_else(|| {
+        nonce_keys_to_resolve.dedup();
+
+        let normal_delay = self.tx_batch_interval.unwrap_or_else(|| {
             self.second_longest_recent_block_delay()
                 .unwrap_or(self.min_block_production_delay + Duration::from_millis(100))
         });
-        Ok(next_delay)
+        let next_delay = if was_requeued || !nonce_keys_to_resolve.is_empty() {
+            Duration::from_millis(100)
+        } else {
+            normal_delay
+        };
+        Ok((next_delay, nonce_keys_to_resolve))
+    }
+
+    pub(crate) fn force_resolve_nonces(
+        &mut self,
+        _tx_block_queue: &Mutex<VecDeque<MappedBlock>>,
+        db: &DB,
+        nonce_key: &NonceLookupKey,
+        source_height: BlockHeight,
+        nonce: Nonce,
+    ) -> anyhow::Result<()> {
+        if let Some(mut n) = crate::read_target_nonce(db, nonce_key)? {
+            n.nonce = std::cmp::max(n.nonce, Some(nonce));
+            n.pending_outcomes.clear();
+            crate::put_target_nonce(db, nonce_key, &n)?;
+        }
+
+        let info = match self.nonces.get_mut(nonce_key) {
+            Some(info) => info,
+            None => return Ok(()),
+        };
+        info.target_nonce.nonce = std::cmp::max(info.target_nonce.nonce, Some(nonce));
+        info.target_nonce.pending_outcomes.clear();
+
+        // Don't assign nonces to individual txs here. Re-queued blocks are
+        // sent after all new blocks, so nonces assigned now would be stale
+        // by send time. Instead, resolve_block_nonces() is called just
+        // before sending to assign fresh nonces from info.target_nonce.
+
+        tracing::debug!(
+            target: "mirror",
+            ?nonce_key,
+            source_height,
+            nonce,
+            "recorded discovered nonce for key",
+        );
+
+        Ok(())
+    }
+
+    /// Resolve AwaitingNonce txs in a specific block just before sending.
+    /// Must be called while holding the tracker lock to coordinate with
+    /// next_nonce(). Uses info.target_nonce.nonce as the base, which
+    /// reflects all nonces assigned to date (including future mapped blocks).
+    pub(crate) fn resolve_block_nonces(
+        &mut self,
+        tx_block_queue: &mut VecDeque<MappedBlock>,
+        block_idx: usize,
+    ) {
+        let block = match tx_block_queue.get(block_idx) {
+            Some(b) => b,
+            None => return,
+        };
+        // Collect (chunk_idx, tx_idx, nonce_key) for AwaitingNonce txs.
+        let mut to_resolve: Vec<(usize, usize, NonceLookupKey)> = Vec::new();
+        for (ci, chunk) in block.chunks.iter().enumerate() {
+            for (ti, tx) in chunk.txs.iter().enumerate() {
+                if let TargetChainTx::AwaitingNonce(t) = tx {
+                    to_resolve.push((ci, ti, NonceLookupKey::from_tx(&t.target_tx)));
+                }
+            }
+        }
+        if to_resolve.is_empty() {
+            return;
+        }
+        let source_height = block.source_height;
+        let block = tx_block_queue.get_mut(block_idx).unwrap();
+        let mut resolved: u64 = 0;
+        for (ci, ti, nonce_key) in &to_resolve {
+            let info = match self.nonces.get_mut(nonce_key) {
+                Some(info) => info,
+                None => continue,
+            };
+            let nonce = match info.target_nonce.nonce {
+                Some(n) => n + 1,
+                None => continue,
+            };
+            info.target_nonce.nonce = Some(nonce);
+            let tx_ref = TxRef { source_height, shard_id: block.chunks[*ci].shard_id, tx_idx: *ti };
+            info.txs_awaiting_nonce.remove(&tx_ref);
+            let tx = &mut block.chunks[*ci].txs[*ti];
+            if let TargetChainTx::AwaitingNonce(_) = tx {
+                tx.set_nonce(nonce);
+                resolved += 1;
+                tracing::debug!(
+                    target: "mirror",
+                    ?nonce_key,
+                    %tx_ref,
+                    nonce,
+                    "resolved nonce at send time",
+                );
+            }
+        }
+        if resolved > 0 {
+            crate::metrics::NONCES_FORCE_RESOLVED.with_label_values(&["success"]).inc_by(resolved);
+            tracing::info!(
+                target: "mirror",
+                source_height,
+                resolved,
+                total = to_resolve.len(),
+                "resolved awaiting-nonce txs at send time",
+            );
+        }
     }
 }

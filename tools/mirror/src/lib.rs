@@ -683,17 +683,6 @@ impl TargetChainTx {
 
     // For an AwaitingNonce(_), set the nonce and sign the transaction, changing self into Ready(_).
     // must not be called if self is Ready(_)
-    fn try_set_nonce(&mut self, nonce: Option<Nonce>) {
-        let nonce = match self {
-            Self::AwaitingNonce(t) => match std::cmp::max(t.target_nonce.nonce, nonce) {
-                Some(n) => n,
-                None => return,
-            },
-            Self::Ready(_) => unreachable!(),
-        };
-        self.set_nonce(nonce);
-    }
-
     fn new_ready(mapping: TxMapping, nonce: Nonce) -> Self {
         Self::Ready(MappedTx::new(mapping, nonce))
     }
@@ -1776,7 +1765,7 @@ impl<T: ChainAccess> TxMirror<T> {
         if !txs.is_empty() {
             Self::send_transactions(target_client, txs.iter_mut()).await?;
             let mut tracker = tracker.lock();
-            tracker.on_txs_sent(
+            let (_delay, _keys) = tracker.on_txs_sent(
                 tx_block_queue,
                 &self.db,
                 crate::chain_tracker::SentBatch::ExtraTxs(txs),
@@ -1789,6 +1778,7 @@ impl<T: ChainAccess> TxMirror<T> {
     async fn send_txs_loop(
         db: Arc<DB>,
         blocks_sent: mpsc::Sender<TxBatch>,
+        tracker: Arc<Mutex<crate::chain_tracker::TxTracker>>,
         tx_block_queue: Arc<Mutex<VecDeque<MappedBlock>>>,
         mut send_time: Pin<Box<tokio::time::Sleep>>,
         send_delay: Arc<Mutex<Duration>>,
@@ -1800,24 +1790,41 @@ impl<T: ChainAccess> TxMirror<T> {
             (&mut send_time).await;
 
             let tx_batch = {
-                let tx_block_queue = tx_block_queue.lock();
-                let b = match sent_source_height {
-                    Some(sent_source_height) => {
-                        let mut block_idx = None;
-                        for (idx, b) in tx_block_queue.iter().enumerate() {
-                            if b.source_height > sent_source_height {
-                                block_idx = Some(idx);
+                // Lock tracker first, then queue (same order as queue_txs_loop)
+                // to avoid deadlocks. The tracker lock prevents
+                // force_resolve_nonces from modifying the queue while we
+                // clone the TxBatch.
+                let mut tracker_guard = tracker.lock();
+                let mut tx_block_queue = tx_block_queue.lock();
+                let block_idx = match sent_source_height {
+                    Some(h) => {
+                        let mut idx = None;
+                        for (i, b) in tx_block_queue.iter().enumerate() {
+                            if b.source_height > h {
+                                idx = Some(i);
                                 break;
                             }
                         }
-                        match block_idx {
-                            Some(idx) => tx_block_queue.get(idx),
-                            None => None,
-                        }
+                        // If no new block found, pick any block in the queue
+                        // (could be a re-queued block with awaiting-nonce txs).
+                        idx.unwrap_or(0)
                     }
-                    None => tx_block_queue.get(0),
+                    None => 0,
                 };
-                b.map(|b| TxBatch::from(b))
+                // For re-queued blocks, resolve AwaitingNonce txs just before
+                // sending. This ensures nonces are assigned using the latest
+                // info.target_nonce.nonce (which accounts for all mapped
+                // blocks), avoiding stale nonces from early resolution.
+                let is_requeue_block = sent_source_height.map_or(false, |h| {
+                    tx_block_queue.get(block_idx).map_or(false, |b| b.source_height <= h)
+                });
+                if is_requeue_block {
+                    tracker_guard.resolve_block_nonces(&mut tx_block_queue, block_idx);
+                }
+                match tx_block_queue.get(block_idx) {
+                    Some(block) => Some(TxBatch::from(block)),
+                    None => None,
+                }
             };
 
             let mut tx_batch = match tx_batch {
@@ -1830,18 +1837,27 @@ impl<T: ChainAccess> TxMirror<T> {
 
             let start_time = tokio::time::Instant::now();
 
-            tracing::trace!(target: "mirror", source_height = tx_batch.source_height, "send tx batch");
+            // Detect re-queued blocks before updating sent_source_height.
+            let is_requeue = sent_source_height.map_or(false, |h| tx_batch.source_height <= h);
+
+            tracing::trace!(target: "mirror", source_height = tx_batch.source_height, is_requeue, "send tx batch");
             Self::send_transactions(
                 &target_client,
                 tx_batch.txs.iter_mut().map(|(_tx_ref, tx)| tx),
             )
             .await?;
-            set_last_source_height(&db, tx_batch.source_height)?;
-            sent_source_height = Some(tx_batch.source_height);
+
+            // Only advance the high-water mark for new (not re-queued) blocks.
+            if !is_requeue {
+                set_last_source_height(&db, tx_batch.source_height)?;
+                sent_source_height = Some(tx_batch.source_height);
+            }
 
             blocks_sent.send(tx_batch).await.context("failed to send block")?;
 
-            let send_delay = *send_delay.lock();
+            // For re-queued blocks, use a short delay directly.
+            let send_delay =
+                if is_requeue { Duration::from_millis(100) } else { *send_delay.lock() };
             tracing::trace!(target: "mirror", ?send_delay, "sleep before sending more txs");
             let next_send_time = start_time + send_delay;
             send_time.as_mut().reset(next_send_time);
@@ -1943,20 +1959,52 @@ impl<T: ChainAccess> TxMirror<T> {
                     // we don't call on_target_block() in the other thread between removing the block
                     // and calling on_txs_sent(), because that could lead to a bug looking up transactions
                     // in TxTracker::get_tx()
-                    let mut tracker = tracker.lock();
+                    let requeued_source_height = tx_batch.source_height;
+                    let nonce_keys_to_resolve;
                     {
-                        let mut tx_block_queue = tx_block_queue.lock();
-                        let b = tx_block_queue.pop_front().unwrap();
-                        assert!(b.source_height == tx_batch.source_height);
-                    };
-                    let target_height = *target_height.read();
-                    let new_delay = tracker.on_txs_sent(
-                        &tx_block_queue,
-                        &self.db,
-                        crate::chain_tracker::SentBatch::MappedBlock(tx_batch),
-                        target_height,
-                    )?;
-                    *send_delay.lock() = new_delay;
+                        let mut tracker = tracker.lock();
+                        {
+                            let mut tx_block_queue = tx_block_queue.lock();
+                            let idx = tx_block_queue
+                                .iter()
+                                .position(|b| b.source_height == tx_batch.source_height)
+                                .unwrap();
+                            tx_block_queue.remove(idx).unwrap();
+                        };
+                        let target_height = *target_height.read();
+                        let (new_delay, keys) = tracker.on_txs_sent(
+                            &tx_block_queue,
+                            &self.db,
+                            crate::chain_tracker::SentBatch::MappedBlock(tx_batch),
+                            target_height,
+                        )?;
+                        *send_delay.lock() = new_delay;
+                        nonce_keys_to_resolve = keys;
+                    }
+                    // Actively fetch nonces from the target chain for re-queued
+                    // AwaitingNonce txs.
+                    for nonce_key in &nonce_keys_to_resolve {
+                        match crate::fetch_nonce(&target_view_client, nonce_key).await? {
+                            Some(nonce) => {
+                                let mut tracker = tracker.lock();
+                                tracker.force_resolve_nonces(
+                                    &tx_block_queue,
+                                    &self.db,
+                                    nonce_key,
+                                    requeued_source_height,
+                                    nonce,
+                                )?;
+                            }
+                            None => {
+                                tracing::debug!(
+                                    target: "mirror",
+                                    ?nonce_key,
+                                    "fetch_nonce returned None for re-queued key",
+                                );
+                            }
+                        }
+                    }
+                    crate::metrics::log_summary();
                 }
                 msg = accounts_to_unstake.recv() => {
                     let staked_accounts = msg.unwrap();
@@ -2163,12 +2211,13 @@ impl<T: ChainAccess> TxMirror<T> {
                 Self::send_transactions(&rpc_handler, b.txs.iter_mut().map(|(_tx_ref, tx)| tx))
                     .await?;
                 let mut tracker = tracker.lock();
-                send_delay = tracker.on_txs_sent(
+                let (new_delay, _keys) = tracker.on_txs_sent(
                     &tx_block_queue,
                     &self.db,
                     crate::chain_tracker::SentBatch::MappedBlock(b),
                     *target_height.read(),
                 )?;
+                send_delay = new_delay;
             }
         }
         self.queue_txs(
@@ -2185,6 +2234,7 @@ impl<T: ChainAccess> TxMirror<T> {
         let (blocks_sent_tx, blocks_sent_rx) = mpsc::channel(10);
         let tx_block_queue2 = tx_block_queue.clone();
         let rpc_handler2 = rpc_handler.clone();
+        let tracker2 = tracker.clone();
         let db = self.db.clone();
         let (send_txs_done_tx, send_txs_done_rx) =
             tokio::sync::oneshot::channel::<anyhow::Result<()>>();
@@ -2192,6 +2242,7 @@ impl<T: ChainAccess> TxMirror<T> {
             let res = Self::send_txs_loop(
                 db,
                 blocks_sent_tx,
+                tracker2,
                 tx_block_queue2,
                 send_time,
                 send_delay2,
