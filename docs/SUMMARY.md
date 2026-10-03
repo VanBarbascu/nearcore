@@ -135,5 +135,6 @@
 - [Overview](./misc/README.md)
 - [State Sync Dump](./misc/state_sync_dump.md)
 - [Archival node - recovery of missing data](./misc/archival_data_recovery.md)
+- [Forknet traffic from a cloud archive](./misc/forknet_cloud_archive_source.md)
 - [Grafana MCP Setup for Claude Code](./grafana-mcp-setup.md)
 - [Zulip MCP Setup for Claude Code](./zulip-mcp-setup.md)
